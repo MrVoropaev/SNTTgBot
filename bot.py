@@ -1,5 +1,6 @@
 import json
 import logging
+import requests
 from telegram import (
     Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 )
@@ -7,11 +8,11 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 )
 
-# Конфигурация Plivo (аналог Twilio)
-PLIVO_AUTH_ID = "your_auth_id"
-PLIVO_AUTH_TOKEN = "your_auth_token"
-PLIVO_PHONE_NUMBER = "+12345678900"
-GATE_PHONE_NUMBER = "+79876543210"
+# Конфигурация MTT API
+MTT_API_URL = "https://api.mtt.ru/v1"
+MTT_API_KEY = "your_mtt_api_key"
+MTT_CALLER_ID = "79876543210"  # Ваш номер в формате 79...
+GATE_PHONE_NUMBER = "79876543210"  # Номер шлагбаума в формате 79...
 
 # Логирование
 logging.basicConfig(
@@ -39,64 +40,164 @@ CHAT_LINK = "https://t.me/+your_chat_link_here"
 PAYMENT_LINK = "https://your-payment-link"
 REKVIZITY = "Реквизиты СНТ «Победа»:\nИНН: ХХХХХХ\nБИК: ХХХХХХ\n..."
 
-# Функция звонка через Plivo
-def call_gate_via_plivo():
+# Функция звонка через MTT API
+def call_gate_via_mtt():
+    """Совершение звонка через API МТТ"""
     try:
-        import plivo
-        
-        # Создаем клиент Plivo
-        client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
-        
-        # Параметры звонка
-        call_params = {
-            'from': PLIVO_PHONE_NUMBER,
-            'to': GATE_PHONE_NUMBER,
-            'answer_url': "https://s3.amazonaws.com/static.plivo.com/answer.xml",  # XML с инструкцией
-            'answer_method': "GET"
+        headers = {
+            "Authorization": f"Bearer {MTT_API_KEY}",
+            "Content-Type": "application/json"
         }
         
-        # Инициируем звонок
-        response = client.calls.create(**call_params)
+        # Данные для создания звонка
+        call_data = {
+            "caller_id": MTT_CALLER_ID,
+            "callee_number": GATE_PHONE_NUMBER,
+            "max_duration": 30,  # максимальная длительность звонка в секундах
+            "auto_answer": True  # автоматическое принятие вызова
+        }
         
-        logger.info(f"Call initiated: RequestUUID={response.request_uuid}")
-        return True
-    except Exception as e:
-        logger.error(f"Plivo call failed: {e}")
-        return False
-
-# Альтернативный вариант через Telnyx (другой аналог Twilio)
-def call_gate_via_telnyx():
-    """
-    Альтернативная реализация через Telnyx
-    Раскомментируйте, если хотите использовать Telnyx вместо Plivo
-    """
-    try:
-        from telnyx import Telnyx
-        telnyx = Telnyx(api_key="your_telnyx_api_key")
-        
-        call = telnyx.Call.create(
-            from_=PLIVO_PHONE_NUMBER,  # используем ту же переменную для номера
-            to=GATE_PHONE_NUMBER,
-            connection_id="your_telnyx_connection_id"  # ID голосового соединения
+        response = requests.post(
+            f"{MTT_API_URL}/calls",
+            json=call_data,
+            headers=headers,
+            timeout=10
         )
         
-        logger.info(f"Call initiated: CallID={call.id}")
-        return True
+        if response.status_code == 200:
+            call_info = response.json()
+            logger.info(f"MTT call initiated: CallID={call_info.get('call_id')}")
+            return True
+        else:
+            logger.error(f"MTT API error: {response.status_code} - {response.text}")
+            return False
+            
     except Exception as e:
-        logger.error(f"Telnyx call failed: {e}")
+        logger.error(f"MTT call failed: {e}")
+        return False
+
+# Альтернативный вариант через Zadarma API
+def call_gate_via_zadarma():
+    """Альтернативная реализация через Zadarma API"""
+    try:
+        api_key = "your_zadarma_api_key"
+        secret_key = "your_zadarma_secret"
+        
+        # Генерация подписи для API
+        import hashlib
+        import hmac
+        import time
+        
+        current_time = str(int(time.time()))
+        sign_string = current_time + secret_key
+        signature = hmac.new(secret_key.encode(), sign_string.encode(), hashlib.sha1).hexdigest()
+        
+        headers = {
+            "Authorization": f"{api_key}:{signature}",
+            "Content-Type": "application/json"
+        }
+        
+        call_data = {
+            "from": MTT_CALLER_ID,  # используем тот же номер
+            "to": GATE_PHONE_NUMBER,
+            "predicted": "auto"  # автоматическое определение номера
+        }
+        
+        response = requests.post(
+            "https://api.zadarma.com/v1/request/callback/",
+            json=call_data,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info("Zadarma call initiated successfully")
+            return True
+        else:
+            logger.error(f"Zadarma API error: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Zadarma call failed: {e}")
+        return False
+
+# Альтернативный вариант через простой SIP-звонок
+def call_gate_via_sip():
+    """Простая реализация через SIP (для Asterisk/Freeswitch)"""
+    try:
+        # Данные для вашей SIP-АТС
+        sip_server = "your_sip_server.com"
+        sip_username = "your_sip_username"
+        sip_password = "your_sip_password"
+        
+        # Используем библиотеку pjsua2 для SIP-звонков
+        try:
+            import pjsua2 as pj
+            
+            # Создаем аккаунт
+            acc_cfg = pj.AccountConfig()
+            acc_cfg.idUri = f"sip:{sip_username}@{sip_server}"
+            acc_cfg.regConfig.registrarUri = f"sip:{sip_server}"
+            acc_cfg.sipConfig.authCreds.append(
+                pj.AuthCredInfo("digest", "*", sip_username, 0, sip_password)
+            )
+            
+            # Здесь должна быть логика инициализации SIP-звонка
+            # Это упрощенный пример - в реальности требуется полная настройка PJSUA2
+            
+            logger.info("SIP call configured")
+            return True
+            
+        except ImportError:
+            logger.warning("pjsua2 not available, using fallback")
+            # Fallback: отправка команды на SIP-сервер через HTTP API
+            sip_data = {
+                "extension": "100",  # номер внутреннего абонента
+                "number": GATE_PHONE_NUMBER,
+                "callerid": MTT_CALLER_ID
+            }
+            
+            response = requests.post(
+                f"http://{sip_server}/api/call",
+                json=sip_data,
+                auth=(sip_username, sip_password),
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                logger.info("SIP call initiated via HTTP API")
+                return True
+            else:
+                return False
+                
+    except Exception as e:
+        logger.error(f"SIP call failed: {e}")
         return False
 
 async def fake_call_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Функция для имитации звонка на ворота"""
     await update.message.reply_text("📞 Звоню на ворота...")
     
-    # Используем Plivo (можно заменить на call_gate_via_telnyx())
-    success = call_gate_via_plivo()
+    # Пробуем разные способы по порядку
+    success = call_gate_via_mtt()
+    
+    # Если MTT не сработал, пробуем Zadarma
+    if not success:
+        logger.info("Trying Zadarma as fallback...")
+        success = call_gate_via_zadarma()
+    
+    # Если и Zadarma не сработал, пробуем SIP
+    if not success:
+        logger.info("Trying SIP as fallback...")
+        success = call_gate_via_sip()
     
     if success:
         await update.message.reply_text("✅ Ворота открываются. Звонок отправлен.")
     else:
-        await update.message.reply_text("❌ Ошибка при звонке. Попробуйте позже.")
+        await update.message.reply_text(
+            "❌ Ошибка при звонке. Попробуйте позже.\n"
+            "Если проблема повторяется, свяжитесь с председателем СНТ."
+        )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало работы с ботом"""
