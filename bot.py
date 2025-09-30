@@ -7,10 +7,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 )
 
-# Конфигурация Twilio
-TWILIO_ACCOUNT_SID = "your_sid"
-TWILIO_AUTH_TOKEN = "your_token"
-TWILIO_PHONE_NUMBER = "+12345678900"
+# Конфигурация Plivo (аналог Twilio)
+PLIVO_AUTH_ID = "your_auth_id"
+PLIVO_AUTH_TOKEN = "your_auth_token"
+PLIVO_PHONE_NUMBER = "+12345678900"
 GATE_PHONE_NUMBER = "+79876543210"
 
 # Логирование
@@ -39,30 +39,60 @@ CHAT_LINK = "https://t.me/+your_chat_link_here"
 PAYMENT_LINK = "https://your-payment-link"
 REKVIZITY = "Реквизиты СНТ «Победа»:\nИНН: ХХХХХХ\nБИК: ХХХХХХ\n..."
 
-# Функция звонка через Twilio
-def call_gate_via_twilio():
+# Функция звонка через Plivo
+def call_gate_via_plivo():
     try:
-        from twilio.rest import Client
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-        # Исходящий звонок
-        call = client.calls.create(
-            to=GATE_PHONE_NUMBER,
-            from_=TWILIO_PHONE_NUMBER,
-            url="http://demo.twilio.com/docs/voice.xml"  # XML с инструкцией
-        )
-
-        logger.info(f"Call initiated: SID={call.sid}")
+        import plivo
+        
+        # Создаем клиент Plivo
+        client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+        
+        # Параметры звонка
+        call_params = {
+            'from': PLIVO_PHONE_NUMBER,
+            'to': GATE_PHONE_NUMBER,
+            'answer_url': "https://s3.amazonaws.com/static.plivo.com/answer.xml",  # XML с инструкцией
+            'answer_method': "GET"
+        }
+        
+        # Инициируем звонок
+        response = client.calls.create(**call_params)
+        
+        logger.info(f"Call initiated: RequestUUID={response.request_uuid}")
         return True
     except Exception as e:
-        logger.error(f"Twilio call failed: {e}")
+        logger.error(f"Plivo call failed: {e}")
+        return False
+
+# Альтернативный вариант через Telnyx (другой аналог Twilio)
+def call_gate_via_telnyx():
+    """
+    Альтернативная реализация через Telnyx
+    Раскомментируйте, если хотите использовать Telnyx вместо Plivo
+    """
+    try:
+        from telnyx import Telnyx
+        telnyx = Telnyx(api_key="your_telnyx_api_key")
+        
+        call = telnyx.Call.create(
+            from_=PLIVO_PHONE_NUMBER,  # используем ту же переменную для номера
+            to=GATE_PHONE_NUMBER,
+            connection_id="your_telnyx_connection_id"  # ID голосового соединения
+        )
+        
+        logger.info(f"Call initiated: CallID={call.id}")
+        return True
+    except Exception as e:
+        logger.error(f"Telnyx call failed: {e}")
         return False
 
 async def fake_call_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Функция для имитации звонка на ворота"""
     await update.message.reply_text("📞 Звоню на ворота...")
     
-    success = call_gate_via_twilio()
+    # Используем Plivo (можно заменить на call_gate_via_telnyx())
+    success = call_gate_via_plivo()
+    
     if success:
         await update.message.reply_text("✅ Ворота открываются. Звонок отправлен.")
     else:
