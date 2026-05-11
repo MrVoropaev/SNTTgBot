@@ -36,6 +36,7 @@ CHAT_LINK = os.getenv("CHAT_LINK")
 
 GATE_API_URL = os.getenv("GATE_API_URL")
 GATE_API_KEY = os.getenv("GATE_API_KEY")
+GATE_PHONE = os.getenv("GATE_PHONE")
 
 # =========================================================
 # ЛОГИРОВАНИЕ
@@ -430,38 +431,22 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "🚪 Открыть ворота":
 
-        user_id = update.effective_user.id
+        msg = (
+        "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
 
-        if not can_open_gate(user_id):
+        "📱 Для открытия ворот:\n"
+        "1. Нажмите на номер ниже\n"
+        "2. Совершите звонок\n\n"
 
-            await update.message.reply_text(
-                "⏳ Подождите 30 секунд перед повторным открытием."
-            )
+        f"📞 {GATE_PHONE}\n\n"
 
-            return MAIN_MENU
-
-        await update.message.reply_text(
-            "📞 Отправляем команду на открытие ворот..."
+        "⚠️ Работает только "
+        "в мобильном Telegram."
         )
 
-        success = await open_gate()
+        await update.message.reply_text(msg)
 
-        if success:
-
-            logger.info(
-                f"Gate opened by user {user_id}"
-            )
-
-            await update.message.reply_text(
-                "✅ Ворота открываются."
-            )
-
-        else:
-
-            await update.message.reply_text(
-                "❌ Ошибка открытия ворот."
-            )
-
+        
     # =====================================================
     # НЕИЗВЕСТНАЯ КОМАНДА
     # =====================================================
