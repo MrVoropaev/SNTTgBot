@@ -1,0 +1,7 @@
+python-telegram-bot
+os
+logging
+aiohttp
+aiosqlite
+datetime
+dotenv 
