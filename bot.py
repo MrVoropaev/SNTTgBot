@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from telegram import (
     Update,
     KeyboardButton,
@@ -312,24 +314,58 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    # ==========================================
+    # =====================================================
     # ВЗНОСЫ
-    # ==========================================
+    # =====================================================
 
     if text == "💰 Взносы":
 
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "💳 Оплатить через СберБанк",
+                    url=PAYMENT_LINK
+                )
+            ]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         msg = (
-            "💰 ВЗНОСЫ 2026\n\n"
-            "Членский: 5000 ₽\n"
-            "Целевой: 3000 ₽\n\n"
-            f"Оплата:\n{PAYMENT_LINK}"
+            "💰 ВЗНОСЫ СНТ 2026\n\n"
+
+            "Членский взнос: 5000 ₽\n"
+            "Целевой взнос: 3000 ₽\n\n"
+
+            "Способы оплаты:\n"
+            "• СберБанк Онлайн\n"
+            "• СБП\n"
+            "• Банковская карта\n\n"
+
+            "Нажмите кнопку ниже для оплаты."
         )
 
-        await update.message.reply_text(msg)
+        # Если есть QR-код
+        if os.path.exists("data/payment_qr.png"):
 
-    # ==========================================
+            with open("data/payment_qr.png", "rb") as qr:
+
+                await update.message.reply_photo(
+                    photo=qr,
+                    caption=msg,
+                    reply_markup=reply_markup
+                )
+
+        else:
+
+            await update.message.reply_text(
+                msg,
+                reply_markup=reply_markup
+            )
+
+    # =====================================================
     # НОВОСТИ
-    # ==========================================
+    # =====================================================
 
     elif text == "📰 Новости":
 
@@ -350,12 +386,12 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except FileNotFoundError:
 
             await update.message.reply_text(
-                "Новости пока отсутствуют."
+                "📰 Новости пока отсутствуют."
             )
 
-    # ==========================================
+    # =====================================================
     # ЧАТ
-    # ==========================================
+    # =====================================================
 
     elif text == "💬 Чат СНТ":
 
@@ -363,9 +399,9 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💬 Чат СНТ:\n{CHAT_LINK}"
         )
 
-    # ==========================================
+    # =====================================================
     # ДОЛЖНИКИ
-    # ==========================================
+    # =====================================================
 
     elif text == "⚠️ Должники":
 
@@ -386,12 +422,12 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except FileNotFoundError:
 
             await update.message.reply_text(
-                "Список должников отсутствует."
+                "⚠️ Список должников отсутствует."
             )
 
-    # ==========================================
+    # =====================================================
     # ВОРОТА
-    # ==========================================
+    # =====================================================
 
     elif text == "🚪 Открыть ворота":
 
@@ -400,13 +436,13 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not can_open_gate(user_id):
 
             await update.message.reply_text(
-                "⏳ Подождите 30 секунд."
+                "⏳ Подождите 30 секунд перед повторным открытием."
             )
 
             return MAIN_MENU
 
         await update.message.reply_text(
-            "📞 Отправляем команду..."
+            "📞 Отправляем команду на открытие ворот..."
         )
 
         success = await open_gate()
@@ -427,9 +463,9 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Ошибка открытия ворот."
             )
 
-    # ==========================================
-    # НЕИЗВЕСТНО
-    # ==========================================
+    # =====================================================
+    # НЕИЗВЕСТНАЯ КОМАНДА
+    # =====================================================
 
     else:
 
