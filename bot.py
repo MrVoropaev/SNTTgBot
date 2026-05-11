@@ -334,8 +334,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "💰 ВЗНОСЫ СНТ 2026\n\n"
 
-            "Членский взнос: 5000 ₽\n"
-            "Целевой взнос: 3000 ₽\n\n"
+            "Членский взнос: 15000 ₽\n"
 
             "Способы оплаты:\n"
             "• СберБанк Онлайн\n"
