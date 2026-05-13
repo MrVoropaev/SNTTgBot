@@ -35,7 +35,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
 CHAT_LINK = os.getenv("CHAT_LINK")
-DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
+GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
 GATE_API_URL = os.getenv("GATE_API_URL")
 GATE_API_KEY = os.getenv("GATE_API_KEY")
@@ -200,38 +200,36 @@ async def open_gate():
 # ЗАГРУЗКА ДОЛЖНИКОВ ИЗ EXCEL
 # =========================================================
 
-async def load_debtors_from_excel():
+async def load_debtors_from_google_sheets():
 
     try:
 
-        async with aiohttp.ClientSession() as session:
+        if not GOOGLE_SHEETS_ID:
 
-            async with session.get(DEBTORS_FILE_URL) as response:
+            return (
+                "❌ GOOGLE_SHEETS_ID "
+                "не настроен."
+            )
 
-                if response.status != 200:
+        # CSV export URL
+        csv_url = (
+            "https://docs.google.com/"
+            f"spreadsheets/d/{GOOGLE_SHEETS_ID}/"
+            "export?format=csv"
+        )
 
-                    return (
-                        "❌ Не удалось загрузить файл должников."
-                    )
+        logger.info(
+            f"Loading Google Sheets: {csv_url}"
+        )
 
-                content = await response.read()
+        # pandas умеет читать CSV напрямую
+        df = pd.read_csv(csv_url)
 
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".xlsx"
-        ) as temp_file:
+        logger.info(
+            f"Columns: {df.columns.tolist()}"
+        )
 
-            temp_file.write(content)
-
-            temp_path = temp_file.name
-
-        # Чтение Excel
-        df = pd.read_excel(temp_path)
-
-        # Удаление временного файла
-        os.remove(temp_path)
-
-        # Нормализация колонок
+        # Нормализуем колонки
         df.columns = [
             str(col).strip().lower()
             for col in df.columns
@@ -248,8 +246,8 @@ async def load_debtors_from_excel():
             if column not in df.columns:
 
                 return (
-                    "❌ Ошибка структуры файла.\n"
-                    f"Не найден столбец: {column}"
+                    "❌ Неверная структура таблицы.\n\n"
+                    f"Не найден столбец:\n{column}"
                 )
 
         debtors = []
@@ -258,7 +256,7 @@ async def load_debtors_from_excel():
 
             try:
 
-                plot_number = row["номер участка"]
+                plot = row["номер участка"]
 
                 required_amount = float(
                     row["сумма взноса"]
@@ -274,33 +272,50 @@ async def load_debtors_from_excel():
 
                     debtors.append(
                         {
-                            "plot": plot_number,
+                            "plot": plot,
                             "debt": debt
                         }
                     )
 
-            except Exception:
+            except Exception as row_error:
+
+                logger.error(
+                    f"Row error: {row_error}"
+                )
+
                 continue
 
         if not debtors:
+
             return "✅ Задолженностей нет."
 
-        msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
+        msg = (
+            "⚠️ ДОЛЖНИКИ СНТ\n\n"
+        )
 
         for debtor in debtors:
 
             msg += (
-                f"🏠 Участок: {debtor['plot']}\n"
-                f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
+                f"🏠 Участок: "
+                f"{debtor['plot']}\n"
+
+                f"💰 Долг: "
+                f"{int(debtor['debt'])} ₽\n\n"
             )
 
         return msg
 
     except Exception as e:
 
-        logger.error(f"Debtors load error: {e}")
+        logger.exception(
+            "Google Sheets error"
+        )
 
-        return "❌ Ошибка обработки файла должников."
+        return (
+            "❌ Ошибка загрузки "
+            "Google Sheets.\n\n"
+            f"{e}"
+        )
 
 # =========================================================
 # /START
@@ -531,11 +546,11 @@ async def handle_menu(
     elif text == "⚠️ Должники":
 
         await update.message.reply_text(
-            "📄 Загружаем список должников..."
+            "📄 Загружаем данные..."
         )
 
         debtors_message = (
-            await load_debtors_from_excel()
+            await load_debtors_from_google_sheets()
         )
 
         await update.message.reply_text(
