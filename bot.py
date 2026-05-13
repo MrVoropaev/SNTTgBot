@@ -2,17 +2,19 @@ import os
 import logging
 import aiohttp
 import aiosqlite
+import pandas as pd
+import tempfile
+
 from datetime import datetime, timedelta
-
 from dotenv import load_dotenv
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from telegram import (
     Update,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
 )
 
 from telegram.ext import (
@@ -33,6 +35,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
 CHAT_LINK = os.getenv("CHAT_LINK")
+DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
 
 GATE_API_URL = os.getenv("GATE_API_URL")
 GATE_API_KEY = os.getenv("GATE_API_KEY")
@@ -72,6 +75,7 @@ LAST_GATE_OPEN = {}
 # =========================================================
 
 def normalize_phone(phone: str) -> str:
+
     phone = (
         phone.replace(" ", "")
         .replace("-", "")
@@ -92,15 +96,18 @@ def normalize_phone(phone: str) -> str:
 # =========================================================
 
 def can_open_gate(user_id: int) -> bool:
+
     now = datetime.now()
 
     if user_id in LAST_GATE_OPEN:
+
         delta = now - LAST_GATE_OPEN[user_id]
 
         if delta < timedelta(seconds=30):
             return False
 
     LAST_GATE_OPEN[user_id] = now
+
     return True
 
 # =========================================================
@@ -108,6 +115,7 @@ def can_open_gate(user_id: int) -> bool:
 # =========================================================
 
 async def init_db():
+
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute("""
@@ -176,13 +184,123 @@ async def open_gate():
                 if response.status == 200:
                     return True
 
-                logger.error(f"Gate API error: {response.status}")
+                logger.error(
+                    f"Gate API error: {response.status}"
+                )
 
                 return False
 
     except Exception as e:
+
         logger.error(f"Gate open failed: {e}")
+
         return False
+
+# =========================================================
+# ЗАГРУЗКА ДОЛЖНИКОВ ИЗ EXCEL
+# =========================================================
+
+async def load_debtors_from_excel():
+
+    try:
+
+        async with aiohttp.ClientSession() as session:
+
+            async with session.get(DEBTORS_FILE_URL) as response:
+
+                if response.status != 200:
+
+                    return (
+                        "❌ Не удалось загрузить файл должников."
+                    )
+
+                content = await response.read()
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".xlsx"
+        ) as temp_file:
+
+            temp_file.write(content)
+
+            temp_path = temp_file.name
+
+        # Чтение Excel
+        df = pd.read_excel(temp_path)
+
+        # Удаление временного файла
+        os.remove(temp_path)
+
+        # Нормализация колонок
+        df.columns = [
+            str(col).strip().lower()
+            for col in df.columns
+        ]
+
+        required_columns = [
+            "номер участка",
+            "сумма взноса",
+            "фактическая сумма"
+        ]
+
+        for column in required_columns:
+
+            if column not in df.columns:
+
+                return (
+                    "❌ Ошибка структуры файла.\n"
+                    f"Не найден столбец: {column}"
+                )
+
+        debtors = []
+
+        for _, row in df.iterrows():
+
+            try:
+
+                plot_number = row["номер участка"]
+
+                required_amount = float(
+                    row["сумма взноса"]
+                )
+
+                paid_amount = float(
+                    row["фактическая сумма"]
+                )
+
+                debt = required_amount - paid_amount
+
+                if debt > 0:
+
+                    debtors.append(
+                        {
+                            "plot": plot_number,
+                            "debt": debt
+                        }
+                    )
+
+            except Exception:
+                continue
+
+        if not debtors:
+            return "✅ Задолженностей нет."
+
+        msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
+
+        for debtor in debtors:
+
+            msg += (
+                f"🏠 Участок: {debtor['plot']}\n"
+                f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
+            )
+
+        return msg
+
+    except Exception as e:
+
+        logger.error(f"Debtors load error: {e}")
+
+        return "❌ Ошибка обработки файла должников."
 
 # =========================================================
 # /START
@@ -217,17 +335,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ПРОВЕРКА НОМЕРА
 # =========================================================
 
-async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    print(update)
+async def ask_phone(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not update.message:
-
         return ASK_PHONE
 
     contact = update.message.contact
 
-    # Если контакта нет
     if not contact:
 
         await update.message.reply_text(
@@ -236,7 +353,6 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return ASK_PHONE
 
-    # Защита от чужих контактов
     if contact.user_id != update.effective_user.id:
 
         await update.message.reply_text(
@@ -247,11 +363,11 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     phone = normalize_phone(contact.phone_number)
 
-    print("PHONE:", phone)
+    logger.info(f"PHONE: {phone}")
 
     user = await get_user_by_phone(phone)
 
-    print("USER:", user)
+    logger.info(f"USER: {user}")
 
     if not user:
 
@@ -260,7 +376,9 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
 
-        logger.warning(f"Unauthorized access: {phone}")
+        logger.warning(
+            f"Unauthorized access: {phone}"
+        )
 
         return ConversationHandler.END
 
@@ -284,7 +402,10 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ГЛАВНОЕ МЕНЮ
 # =========================================================
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_main_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     keyboard = [
         ["💰 Взносы", "📰 Новости"],
@@ -308,7 +429,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ОБРАБОТКА МЕНЮ
 # =========================================================
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not update.message:
         return MAIN_MENU
@@ -330,25 +454,26 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = InlineKeyboardMarkup(
+            keyboard
+        )
 
         msg = (
             "💰 ВЗНОСЫ СНТ 2026\n\n"
-
-            "Членский взнос: 15000 ₽\n"
-
+            "Членский взнос: 15000 ₽\n\n"
             "Способы оплаты:\n"
             "• СберБанк Онлайн\n"
             "• СБП\n"
             "• Банковская карта\n\n"
-
             "Нажмите кнопку ниже для оплаты."
         )
 
-        # Если есть QR-код
         if os.path.exists("data/payment_qr.png"):
 
-            with open("data/payment_qr.png", "rb") as qr:
+            with open(
+                "data/payment_qr.png",
+                "rb"
+            ) as qr:
 
                 await update.message.reply_photo(
                     photo=qr,
@@ -405,25 +530,17 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "⚠️ Должники":
 
-        try:
+        await update.message.reply_text(
+            "📄 Загружаем список должников..."
+        )
 
-            with open(
-                "data/debtors.txt",
-                "r",
-                encoding="utf-8"
-            ) as f:
+        debtors_message = (
+            await load_debtors_from_excel()
+        )
 
-                debtors = f.read()
-
-            await update.message.reply_text(
-                f"⚠️ Должники:\n\n{debtors}"
-            )
-
-        except FileNotFoundError:
-
-            await update.message.reply_text(
-                "⚠️ Список должников отсутствует."
-            )
+        await update.message.reply_text(
+            debtors_message
+        )
 
     # =====================================================
     # ВОРОТА
@@ -431,22 +548,29 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "🚪 Открыть ворота":
 
+        user_id = update.effective_user.id
+
+        if not can_open_gate(user_id):
+
+            await update.message.reply_text(
+                "⏳ Повторное открытие возможно "
+                "через 30 секунд."
+            )
+
+            return MAIN_MENU
+
         msg = (
-        "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
-
-        "📱 Для открытия ворот:\n"
-        "1. Нажмите на номер ниже\n"
-        "2. Совершите звонок\n\n"
-
-        f"📞 {GATE_PHONE}\n\n"
-
-        "⚠️ Работает только "
-        "в мобильном Telegram."
+            "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
+            "📱 Для открытия ворот:\n"
+            "1. Нажмите на номер ниже\n"
+            "2. Совершите звонок\n\n"
+            f"📞 {GATE_PHONE}\n\n"
+            "⚠️ Работает только "
+            "в мобильном Telegram."
         )
 
         await update.message.reply_text(msg)
 
-        
     # =====================================================
     # НЕИЗВЕСТНАЯ КОМАНДА
     # =====================================================
@@ -463,7 +587,10 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # CANCEL
 # =========================================================
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if update.message:
 
@@ -475,7 +602,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =========================================================
-# MAIN
+# POST INIT
 # =========================================================
 
 async def post_init(app: Application):
@@ -483,6 +610,10 @@ async def post_init(app: Application):
     await init_db()
 
     logger.info("Database initialized")
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
 
@@ -494,6 +625,7 @@ def main():
     )
 
     conv_handler = ConversationHandler(
+
         entry_points=[
             CommandHandler("start", start)
         ],
