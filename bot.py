@@ -26,6 +26,8 @@ from telegram.ext import (
     filters
 )
 
+
+
 # =========================================================
 # ЗАГРУЗКА .ENV
 # =========================================================
@@ -36,6 +38,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
 CHAT_LINK = os.getenv("CHAT_LINK")
 DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
+GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
 GATE_API_URL = os.getenv("GATE_API_URL")
 GATE_API_KEY = os.getenv("GATE_API_KEY")
@@ -203,105 +206,69 @@ async def open_gate():
 async def load_debtors_from_excel():
 
     try:
+        if not GOOGLE_SHEETS_ID:
+            return "❌ GOOGLE_SHEETS_ID не задан в .env"
+
+        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=xlsx"
 
         async with aiohttp.ClientSession() as session:
-
-            async with session.get(DEBTORS_FILE_URL) as response:
+            async with session.get(url) as response:
 
                 if response.status != 200:
-
-                    return (
-                        "❌ Не удалось загрузить файл должников."
-                    )
+                    logger.error(f"HTTP error: {response.status}")
+                    return "❌ Не удалось скачать файл Google Sheets"
 
                 content = await response.read()
 
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".xlsx"
-        ) as temp_file:
+        import tempfile
 
-            temp_file.write(content)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(content)
+            path = tmp.name
 
-            temp_path = temp_file.name
+        df = pd.read_excel(path, engine="openpyxl")
+        os.remove(path)
 
-        # Чтение Excel
-        df = pd.read_excel(temp_path)
+        df.columns = [str(c).strip().lower() for c in df.columns]
 
-        # Удаление временного файла
-        os.remove(temp_path)
+        required = ["номер участка", "сумма взноса", "фактическая сумма"]
 
-        # Нормализация колонок
-        df.columns = [
-            str(col).strip().lower()
-            for col in df.columns
-        ]
-
-        required_columns = [
-            "номер участка",
-            "сумма взноса",
-            "фактическая сумма"
-        ]
-
-        for column in required_columns:
-
-            if column not in df.columns:
-
-                return (
-                    "❌ Ошибка структуры файла.\n"
-                    f"Не найден столбец: {column}"
-                )
+        for col in required:
+            if col not in df.columns:
+                return f"❌ Нет столбца: {col}. Есть: {df.columns.tolist()}"
 
         debtors = []
 
         for _, row in df.iterrows():
 
             try:
+                plot = str(row["номер участка"]).strip()
+                required_sum = float(row["сумма взноса"])
+                paid = float(row["фактическая сумма"])
 
-                plot_number = row["номер участка"]
-
-                required_amount = float(
-                    row["сумма взноса"]
-                )
-
-                paid_amount = float(
-                    row["фактическая сумма"]
-                )
-
-                debt = required_amount - paid_amount
+                debt = required_sum - paid
 
                 if debt > 0:
-
-                    debtors.append(
-                        {
-                            "plot": plot_number,
-                            "debt": debt
-                        }
-                    )
+                    debtors.append((plot, debt))
 
             except Exception:
                 continue
 
         if not debtors:
-            return "✅ Задолженностей нет."
+            return "✅ Должников нет."
+
+        debtors.sort(key=lambda x: x[1], reverse=True)
 
         msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
 
-        for debtor in debtors:
-
-            msg += (
-                f"🏠 Участок: {debtor['plot']}\n"
-                f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
-            )
+        for plot, debt in debtors:
+            msg += f"🏠 Участок {plot} — {int(debt)} ₽\n"
 
         return msg
 
     except Exception as e:
-
-        logger.error(f"Debtors load error: {e}")
-
-        return "❌ Ошибка обработки файла должников."
-
+        logger.error(f"ERROR: {repr(e)}")
+        return f"❌ Ошибка обработки файла: {repr(e)}"
 # =========================================================
 # /START
 # =========================================================
