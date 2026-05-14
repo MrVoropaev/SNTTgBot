@@ -1,11 +1,13 @@
 import os
+import re
 import logging
 import aiohttp
 import aiosqlite
 import pandas as pd
 import tempfile
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+
 from dotenv import load_dotenv
 
 from telegram import (
@@ -17,6 +19,8 @@ from telegram import (
     InlineKeyboardMarkup
 )
 
+from telegram.constants import ChatPermissions
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,7 +31,7 @@ from telegram.ext import (
 )
 
 # =========================================================
-# ЗАГРУЗКА .ENV
+# ЗАГРУЗКА ENV
 # =========================================================
 
 load_dotenv()
@@ -35,14 +39,21 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
 CHAT_LINK = os.getenv("CHAT_LINK")
-GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
+DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
 
-GATE_API_URL = os.getenv("GATE_API_URL")
-GATE_API_KEY = os.getenv("GATE_API_KEY")
 GATE_PHONE = os.getenv("GATE_PHONE")
 
+WELCOME_TEXT = """
+Добро пожаловать в сообщество СНТ «Победа» — место, где ценятся добрососедство, взаимопомощь, уважение и любовь к природе.
+
+Желаем всем солнечных дней, богатых урожаев, приятного отдыха и гармонии!
+
+С уважением,
+Правление СНТ «Победа»
+"""
+
 # =========================================================
-# ЛОГИРОВАНИЕ
+# ЛОГИ
 # =========================================================
 
 os.makedirs("logs", exist_ok=True)
@@ -71,7 +82,50 @@ ASK_PHONE, MAIN_MENU = range(2)
 LAST_GATE_OPEN = {}
 
 # =========================================================
-# НОРМАЛИЗАЦИЯ НОМЕРА
+# СПИСОК МАТОВ
+# =========================================================
+
+BAD_WORDS = [
+    "блять",
+    "блядь",
+    "бля",
+    "сука",
+    "сучка",
+    "хуй",
+    "хуйня",
+    "хуево",
+    "хуевый",
+    "нахуй",
+    "похуй",
+    "ебать",
+    "ебаный",
+    "ебучий",
+    "уебок",
+    "уебище",
+    "пизда",
+    "пиздец",
+    "пиздюк",
+    "залупа",
+    "мудак",
+    "долбоеб",
+    "долбаеб",
+    "гандон",
+    "мразь",
+    "шлюха",
+    "тварь",
+    "сраный",
+    "охуел",
+    "охуеть",
+    "ебло",
+    "чмо",
+    "пидор",
+    "пидорас",
+    "говно",
+    "дерьмо"
+]
+
+# =========================================================
+# НОРМАЛИЗАЦИЯ ТЕЛЕФОНА
 # =========================================================
 
 def normalize_phone(phone: str) -> str:
@@ -92,7 +146,7 @@ def normalize_phone(phone: str) -> str:
     return phone
 
 # =========================================================
-# ПРОВЕРКА RATE LIMIT
+# RATE LIMIT ВОРОТ
 # =========================================================
 
 def can_open_gate(user_id: int) -> bool:
@@ -123,14 +177,15 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 phone TEXT UNIQUE,
                 name TEXT,
-                telegram_id INTEGER
+                telegram_id INTEGER,
+                welcomed INTEGER DEFAULT 0
             )
         """)
 
         await db.commit()
 
 # =========================================================
-# ПОИСК ПОЛЬЗОВАТЕЛЯ
+# ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ
 # =========================================================
 
 async def get_user_by_phone(phone: str):
@@ -138,117 +193,81 @@ async def get_user_by_phone(phone: str):
     async with aiosqlite.connect("database.db") as db:
 
         cursor = await db.execute(
-            "SELECT id, phone, name FROM users WHERE phone = ?",
+            "SELECT id, phone, name, welcomed "
+            "FROM users WHERE phone = ?",
             (phone,)
         )
 
-        row = await cursor.fetchone()
-
-        return row
+        return await cursor.fetchone()
 
 # =========================================================
 # ОБНОВЛЕНИЕ TELEGRAM ID
 # =========================================================
 
-async def update_telegram_id(phone: str, telegram_id: int):
+async def update_telegram_id(phone, telegram_id):
 
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute(
-            "UPDATE users SET telegram_id = ? WHERE phone = ?",
+            "UPDATE users SET telegram_id = ? "
+            "WHERE phone = ?",
             (telegram_id, phone)
         )
 
         await db.commit()
 
 # =========================================================
-# ОТКРЫТИЕ ВОРОТ
+# ПРИВЕТСТВИЕ
 # =========================================================
 
-async def open_gate():
+async def set_welcomed(phone):
 
-    headers = {
-        "Authorization": f"Bearer {GATE_API_KEY}"
-    }
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET welcomed = 1 "
+            "WHERE phone = ?",
+            (phone,)
+        )
+
+        await db.commit()
+
+# =========================================================
+# ЗАГРУЗКА ДОЛЖНИКОВ
+# =========================================================
+
+async def load_debtors():
 
     try:
 
         async with aiohttp.ClientSession() as session:
 
-            async with session.post(
-                GATE_API_URL,
-                headers=headers,
-                timeout=10
+            async with session.get(
+                DEBTORS_FILE_URL
             ) as response:
 
-                if response.status == 200:
-                    return True
+                if response.status != 200:
+                    return None
 
-                logger.error(
-                    f"Gate API error: {response.status}"
-                )
+                content = await response.read()
 
-                return False
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".xlsx"
+        ) as temp_file:
 
-    except Exception as e:
+            temp_file.write(content)
 
-        logger.error(f"Gate open failed: {e}")
+            temp_path = temp_file.name
 
-        return False
+        df = pd.read_excel(temp_path)
 
-# =========================================================
-# ЗАГРУЗКА ДОЛЖНИКОВ ИЗ EXCEL
-# =========================================================
+        os.remove(temp_path)
 
-async def load_debtors_from_google_sheets():
-
-    try:
-
-        if not GOOGLE_SHEETS_ID:
-
-            return (
-                "❌ GOOGLE_SHEETS_ID "
-                "не настроен."
-            )
-
-        # CSV export URL
-        csv_url = (
-            "https://docs.google.com/"
-            f"spreadsheets/d/{GOOGLE_SHEETS_ID}/"
-            "export?format=csv"
-        )
-
-        logger.info(
-            f"Loading Google Sheets: {csv_url}"
-        )
-
-        # pandas умеет читать CSV напрямую
-        df = pd.read_csv(csv_url)
-
-        logger.info(
-            f"Columns: {df.columns.tolist()}"
-        )
-
-        # Нормализуем колонки
         df.columns = [
             str(col).strip().lower()
             for col in df.columns
         ]
-
-        required_columns = [
-            "номер участка",
-            "сумма взноса",
-            "фактическая сумма"
-        ]
-
-        for column in required_columns:
-
-            if column not in df.columns:
-
-                return (
-                    "❌ Неверная структура таблицы.\n\n"
-                    f"Не найден столбец:\n{column}"
-                )
 
         debtors = []
 
@@ -270,61 +289,70 @@ async def load_debtors_from_google_sheets():
 
                 if debt > 0:
 
-                    debtors.append(
-                        {
-                            "plot": plot,
-                            "debt": debt
-                        }
-                    )
+                    debtors.append({
+                        "plot": plot,
+                        "debt": debt
+                    })
 
-            except Exception as row_error:
-
-                logger.error(
-                    f"Row error: {row_error}"
-                )
-
+            except:
                 continue
 
-        if not debtors:
-
-            return "✅ Задолженностей нет."
-
-        msg = (
-            "⚠️ ДОЛЖНИКИ СНТ\n\n"
-        )
-
-        for debtor in debtors:
-
-            msg += (
-                f"🏠 Участок: "
-                f"{debtor['plot']}\n"
-
-                f"💰 Долг: "
-                f"{int(debtor['debt'])} ₽\n\n"
-            )
-
-        return msg
+        return debtors
 
     except Exception as e:
 
-        logger.exception(
-            "Google Sheets error"
-        )
+        logger.error(e)
 
-        return (
-            "❌ Ошибка загрузки "
-            "Google Sheets.\n\n"
-            f"{e}"
-        )
+        return None
 
 # =========================================================
-# /START
+# УВЕДОМЛЕНИЯ О ДОЛГАХ
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def weekly_debt_notification(context):
 
-    if not update.message:
-        return ConversationHandler.END
+    debtors = await load_debtors()
+
+    if not debtors:
+        return
+
+    message = "⚠️ Напоминание о задолженности\n\n"
+
+    for debtor in debtors:
+
+        message += (
+            f"🏠 Участок: {debtor['plot']}\n"
+            f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
+        )
+
+    async with aiosqlite.connect("database.db") as db:
+
+        cursor = await db.execute(
+            "SELECT telegram_id "
+            "FROM users "
+            "WHERE telegram_id IS NOT NULL"
+        )
+
+        users = await cursor.fetchall()
+
+    for user in users:
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=user[0],
+                text=message
+            )
+
+        except Exception as e:
+
+            logger.error(e)
+
+# =========================================================
+# СТАРТ
+# =========================================================
+
+async def start(update, context):
 
     contact_button = KeyboardButton(
         text="📱 Поделиться номером",
@@ -333,66 +361,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[contact_button]]
 
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
-    )
-
     await update.message.reply_text(
         "Здравствуйте!\n\n"
-        "Для входа подтвердите номер телефона.",
-        reply_markup=reply_markup
+        "Подтвердите номер телефона.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True
+        )
     )
 
     return ASK_PHONE
 
 # =========================================================
-# ПРОВЕРКА НОМЕРА
+# ПРОВЕРКА ТЕЛЕФОНА
 # =========================================================
 
-async def ask_phone(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return ASK_PHONE
+async def ask_phone(update, context):
 
     contact = update.message.contact
 
     if not contact:
 
         await update.message.reply_text(
-            "❌ Нажмите кнопку «Поделиться номером»."
+            "Нажмите кнопку отправки номера."
         )
 
         return ASK_PHONE
 
-    if contact.user_id != update.effective_user.id:
-
-        await update.message.reply_text(
-            "❌ Отправьте свой собственный номер."
-        )
-
-        return ASK_PHONE
-
-    phone = normalize_phone(contact.phone_number)
-
-    logger.info(f"PHONE: {phone}")
+    phone = normalize_phone(
+        contact.phone_number
+    )
 
     user = await get_user_by_phone(phone)
-
-    logger.info(f"USER: {user}")
 
     if not user:
 
         await update.message.reply_text(
-            "❌ Ваш номер отсутствует в базе СНТ.",
+            "❌ Номер отсутствует в базе.",
             reply_markup=ReplyKeyboardRemove()
-        )
-
-        logger.warning(
-            f"Unauthorized access: {phone}"
         )
 
         return ConversationHandler.END
@@ -402,25 +408,26 @@ async def ask_phone(
         update.effective_user.id
     )
 
-    context.user_data["phone"] = phone
+    if user[3] == 0:
 
-    logger.info(f"Authorized: {phone}")
+        await update.message.reply_text(
+            WELCOME_TEXT
+        )
+
+        await set_welcomed(phone)
 
     await update.message.reply_text(
         f"✅ Добро пожаловать, {user[2]}!",
         reply_markup=ReplyKeyboardRemove()
     )
 
-    return await show_main_menu(update, context)
+    return await show_menu(update, context)
 
 # =========================================================
-# ГЛАВНОЕ МЕНЮ
+# МЕНЮ
 # =========================================================
 
-async def show_main_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def show_menu(update, context):
 
     keyboard = [
         ["💰 Взносы", "📰 Новости"],
@@ -428,14 +435,12 @@ async def show_main_menu(
         ["⚠️ Должники"]
     ]
 
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
-    )
-
     await update.message.reply_text(
         "Выберите раздел:",
-        reply_markup=reply_markup
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True
+        )
     )
 
     return MAIN_MENU
@@ -444,69 +449,28 @@ async def show_main_menu(
 # ОБРАБОТКА МЕНЮ
 # =========================================================
 
-async def handle_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return MAIN_MENU
+async def handle_menu(update, context):
 
     text = update.message.text
 
-    # =====================================================
     # ВЗНОСЫ
-    # =====================================================
-
     if text == "💰 Взносы":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "💳 Оплатить через СберБанк",
-                    url=PAYMENT_LINK
-                )
-            ]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(
-            keyboard
-        )
-
-        msg = (
-            "💰 ВЗНОСЫ СНТ 2026\n\n"
-            "Членский взнос: 15000 ₽\n\n"
-            "Способы оплаты:\n"
-            "• СберБанк Онлайн\n"
-            "• СБП\n"
-            "• Банковская карта\n\n"
-            "Нажмите кнопку ниже для оплаты."
-        )
-
-        if os.path.exists("data/payment_qr.png"):
-
-            with open(
-                "data/payment_qr.png",
-                "rb"
-            ) as qr:
-
-                await update.message.reply_photo(
-                    photo=qr,
-                    caption=msg,
-                    reply_markup=reply_markup
-                )
-
-        else:
-
-            await update.message.reply_text(
-                msg,
-                reply_markup=reply_markup
+        keyboard = [[
+            InlineKeyboardButton(
+                "💳 Оплатить",
+                url=PAYMENT_LINK
             )
+        ]]
 
-    # =====================================================
+        await update.message.reply_text(
+            "💰 Оплата взносов СНТ",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
     # НОВОСТИ
-    # =====================================================
-
     elif text == "📰 Новости":
 
         try:
@@ -520,47 +484,49 @@ async def handle_menu(
                 news = f.read()
 
             await update.message.reply_text(
-                f"📰 Новости СНТ:\n\n{news}"
+                news
             )
 
-        except FileNotFoundError:
+        except:
 
             await update.message.reply_text(
-                "📰 Новости пока отсутствуют."
+                "Новостей пока нет."
             )
 
-    # =====================================================
     # ЧАТ
-    # =====================================================
-
     elif text == "💬 Чат СНТ":
 
         await update.message.reply_text(
-            f"💬 Чат СНТ:\n{CHAT_LINK}"
+            CHAT_LINK
         )
 
-    # =====================================================
     # ДОЛЖНИКИ
-    # =====================================================
-
     elif text == "⚠️ Должники":
 
+        debtors = await load_debtors()
+
+        if not debtors:
+
+            await update.message.reply_text(
+                "❌ Ошибка загрузки файла."
+            )
+
+            return MAIN_MENU
+
+        message = "⚠️ ДОЛЖНИКИ СНТ\n\n"
+
+        for debtor in debtors:
+
+            message += (
+                f"🏠 Участок: {debtor['plot']}\n"
+                f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
+            )
+
         await update.message.reply_text(
-            "📄 Загружаем данные..."
+            message
         )
 
-        debtors_message = (
-            await load_debtors_from_google_sheets()
-        )
-
-        await update.message.reply_text(
-            debtors_message
-        )
-
-    # =====================================================
     # ВОРОТА
-    # =====================================================
-
     elif text == "🚪 Открыть ворота":
 
         user_id = update.effective_user.id
@@ -568,27 +534,15 @@ async def handle_menu(
         if not can_open_gate(user_id):
 
             await update.message.reply_text(
-                "⏳ Повторное открытие возможно "
-                "через 30 секунд."
+                "⏳ Повторите через 30 секунд."
             )
 
             return MAIN_MENU
 
-        msg = (
-            "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
-            "📱 Для открытия ворот:\n"
-            "1. Нажмите на номер ниже\n"
-            "2. Совершите звонок\n\n"
-            f"📞 {GATE_PHONE}\n\n"
-            "⚠️ Работает только "
-            "в мобильном Telegram."
+        await update.message.reply_text(
+            "🚪 Для открытия ворот "
+            f"совершите звонок:\n\n{GATE_PHONE}"
         )
-
-        await update.message.reply_text(msg)
-
-    # =====================================================
-    # НЕИЗВЕСТНАЯ КОМАНДА
-    # =====================================================
 
     else:
 
@@ -599,20 +553,69 @@ async def handle_menu(
     return MAIN_MENU
 
 # =========================================================
+# МОДЕРАЦИЯ ЧАТА
+# =========================================================
+
+async def moderate_chat(update, context):
+
+    if not update.message:
+        return
+
+    if not update.message.text:
+        return
+
+    text = update.message.text.lower()
+
+    for word in BAD_WORDS:
+
+        if word in text:
+
+            try:
+
+                await update.message.delete()
+
+            except:
+                pass
+
+            try:
+
+                until_date = (
+                    datetime.now() +
+                    timedelta(hours=24)
+                )
+
+                await context.bot.ban_chat_member(
+                    chat_id=update.effective_chat.id,
+                    user_id=update.effective_user.id,
+                    until_date=until_date
+                )
+
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=(
+                        f"⛔ "
+                        f"{update.effective_user.full_name} "
+                        f"заблокирован на 24 часа "
+                        f"за нарушение правил."
+                    )
+                )
+
+            except Exception as e:
+
+                logger.error(e)
+
+            return
+
+# =========================================================
 # CANCEL
 # =========================================================
 
-async def cancel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def cancel(update, context):
 
-    if update.message:
-
-        await update.message.reply_text(
-            "До свидания.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+    await update.message.reply_text(
+        "До свидания.",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
     return ConversationHandler.END
 
@@ -620,11 +623,11 @@ async def cancel(
 # POST INIT
 # =========================================================
 
-async def post_init(app: Application):
+async def post_init(app):
 
     await init_db()
 
-    logger.info("Database initialized")
+    logger.info("DB initialized")
 
 # =========================================================
 # MAIN
@@ -649,14 +652,15 @@ def main():
 
             ASK_PHONE: [
                 MessageHandler(
-                    filters.ALL,
+                    filters.CONTACT,
                     ask_phone
                 )
             ],
 
             MAIN_MENU: [
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
+                    filters.TEXT &
+                    ~filters.COMMAND,
                     handle_menu
                 )
             ]
@@ -668,6 +672,22 @@ def main():
     )
 
     app.add_handler(conv_handler)
+
+    # МОДЕРАЦИЯ ЧАТА
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT &
+            filters.ChatType.GROUPS,
+            moderate_chat
+        )
+    )
+
+    # ЕЖЕНЕДЕЛЬНОЕ НАПОМИНАНИЕ
+    app.job_queue.run_weekly(
+        weekly_debt_notification,
+        time=time(hour=10, minute=0),
+        days=(0,)
+    )
 
     logger.info("Bot started")
 
