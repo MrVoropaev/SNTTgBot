@@ -216,37 +216,48 @@ async def load_debtors_from_excel():
 
                 if response.status != 200:
                     logger.error(f"HTTP error: {response.status}")
-                    return "❌ Не удалось скачать файл Google Sheets"
+                    return "❌ Не удалось загрузить файл Excel."
 
                 content = await response.read()
 
         import tempfile
+        from openpyxl import load_workbook
 
+        # сохраняем файл
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
             tmp.write(content)
             path = tmp.name
 
-        df = pd.read_excel(path, engine="openpyxl")
-        os.remove(path)
+        wb = load_workbook(path)
+        ws = wb.active
 
-        df.columns = [str(c).strip().lower() for c in df.columns]
+        # читаем заголовки
+        rows = list(ws.iter_rows(values_only=True))
 
-        required = ["номер участка", "сумма взноса", "фактическая сумма"]
+        if not rows:
+            return "❌ Пустой файл."
 
-        for col in required:
-            if col not in df.columns:
-                return f"❌ Нет столбца: {col}. Есть: {df.columns.tolist()}"
+        headers = [str(h).strip().lower() for h in rows[0]]
+
+        # ищем индексы колонок
+        try:
+            idx_plot = headers.index("номер участка")
+            idx_required = headers.index("сумма взноса")
+            idx_paid = headers.index("фактическая сумма")
+        except ValueError:
+            return f"❌ Неверные столбцы: {headers}"
 
         debtors = []
 
-        for _, row in df.iterrows():
+        for row in rows[1:]:
 
             try:
-                plot = str(row["номер участка"]).strip()
-                required_sum = float(row["сумма взноса"])
-                paid = float(row["фактическая сумма"])
+                plot = str(int(float(row[idx_plot]))).strip()
 
-                debt = required_sum - paid
+                required = float(row[idx_required] or 0)
+                paid = float(row[idx_paid] or 0)
+
+                debt = required - paid
 
                 if debt > 0:
                     debtors.append((plot, debt))
@@ -254,20 +265,24 @@ async def load_debtors_from_excel():
             except Exception:
                 continue
 
+        wb.close()
+        os.remove(path)
+
         if not debtors:
             return "✅ Должников нет."
 
+        # сортировка по долгу
         debtors.sort(key=lambda x: x[1], reverse=True)
 
         msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
 
         for plot, debt in debtors:
-            msg += f"🏠 Участок {plot} — {int(debt)} ₽\n"
+            msg += f"🏠 Участок: {plot}\n💰 Долг: {int(debt)} ₽\n\n"
 
         return msg
 
     except Exception as e:
-        logger.error(f"ERROR: {repr(e)}")
+        logger.error(f"Excel error: {repr(e)}")
         return f"❌ Ошибка обработки файла: {repr(e)}"
 # =========================================================
 # /START
