@@ -6,9 +6,11 @@ import aiosqlite
 import pandas as pd
 import tempfile
 
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
+
+from apscheduler.triggers.cron import CronTrigger
 
 from telegram import (
     Update,
@@ -29,20 +31,23 @@ from telegram.ext import (
 )
 
 # =========================================================
-# ЗАГРУЗКА ENV
+# ENV
 # =========================================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
-
 CHAT_LINK = os.getenv("CHAT_LINK")
-
 DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
-
 GATE_PHONE = os.getenv("GATE_PHONE")
+
+# =========================================================
+# ПРОВЕРКА ENV
+# =========================================================
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в .env")
 
 # =========================================================
 # ПРИВЕТСТВИЕ
@@ -87,7 +92,7 @@ ASK_PHONE, MAIN_MENU = range(2)
 LAST_GATE_OPEN = {}
 
 # =========================================================
-# СПИСОК ЗАПРЕЩЕННЫХ СЛОВ
+# МАТ
 # =========================================================
 
 BAD_WORDS = [
@@ -97,47 +102,31 @@ BAD_WORDS = [
     "сука",
     "сучка",
     "хуй",
-    "хуи",
-    "хуево",
-    "хуевый",
     "нахуй",
     "похуй",
+    "хуево",
+    "хуевый",
     "ебать",
     "ебаный",
     "ебучий",
     "уебок",
-    "уебище",
     "пизда",
     "пиздец",
-    "пиздюк",
     "залупа",
     "мудак",
     "долбоеб",
-    "долбаеб",
     "гандон",
     "мразь",
     "шлюха",
-    "тварь",
-    "сраный",
-    "охуел",
-    "охуеть",
     "ебло",
-    "чмо",
     "пидор",
     "пидорас",
     "говно",
     "дерьмо",
-    "ебанат",
-    "уебан",
-    "заебал",
-    "заебись",
-    "наебал",
     "еблан",
     "мудила",
     "сучара",
     "хер",
-    "хрен",
-    "говнюк",
     "дебил"
 ]
 
@@ -183,7 +172,7 @@ def can_open_gate(user_id: int) -> bool:
     return True
 
 # =========================================================
-# ИНИЦИАЛИЗАЦИЯ БАЗЫ
+# БАЗА
 # =========================================================
 
 async def init_db():
@@ -211,8 +200,15 @@ async def get_user_by_phone(phone: str):
     async with aiosqlite.connect("database.db") as db:
 
         cursor = await db.execute(
-            "SELECT id, phone, name, welcomed "
-            "FROM users WHERE phone = ?",
+            """
+            SELECT
+                id,
+                phone,
+                name,
+                welcomed
+            FROM users
+            WHERE phone = ?
+            """,
             (phone,)
         )
 
@@ -230,9 +226,11 @@ async def update_telegram_id(
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute(
-            "UPDATE users "
-            "SET telegram_id = ? "
-            "WHERE phone = ?",
+            """
+            UPDATE users
+            SET telegram_id = ?
+            WHERE phone = ?
+            """,
             (telegram_id, phone)
         )
 
@@ -247,9 +245,11 @@ async def set_welcomed(phone: str):
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute(
-            "UPDATE users "
-            "SET welcomed = 1 "
-            "WHERE phone = ?",
+            """
+            UPDATE users
+            SET welcomed = 1
+            WHERE phone = ?
+            """,
             (phone,)
         )
 
@@ -272,11 +272,11 @@ async def load_debtors():
                 if response.status != 200:
 
                     logger.error(
-                        f"Excel load error: "
+                        f"Ошибка загрузки Excel: "
                         f"{response.status}"
                     )
 
-                    return None
+                    return []
 
                 content = await response.read()
 
@@ -310,10 +310,10 @@ async def load_debtors():
             if column not in df.columns:
 
                 logger.error(
-                    f"Missing column: {column}"
+                    f"Нет колонки: {column}"
                 )
 
-                return None
+                return []
 
         debtors = []
 
@@ -349,23 +349,25 @@ async def load_debtors():
 
                 logger.error(e)
 
-                continue
-
         return debtors
 
     except Exception as e:
 
         logger.error(
-            f"Debtors load error: {e}"
+            f"Ошибка debtors: {e}"
         )
 
-        return None
+        return []
 
 # =========================================================
-# ЕЖЕНЕДЕЛЬНЫЕ УВЕДОМЛЕНИЯ
+# УВЕДОМЛЕНИЯ
 # =========================================================
 
 async def weekly_debt_notification(context):
+
+    logger.info(
+        "Weekly debt notification started"
+    )
 
     debtors = await load_debtors()
 
@@ -374,11 +376,14 @@ async def weekly_debt_notification(context):
 
     async with aiosqlite.connect("database.db") as db:
 
-        cursor = await db.execute(
-            "SELECT telegram_id, phone, name "
-            "FROM users "
-            "WHERE telegram_id IS NOT NULL"
-        )
+        cursor = await db.execute("""
+            SELECT
+                telegram_id,
+                phone,
+                name
+            FROM users
+            WHERE telegram_id IS NOT NULL
+        """)
 
         users = await cursor.fetchall()
 
@@ -399,8 +404,7 @@ async def weekly_debt_notification(context):
                         f"У вас имеется задолженность "
                         f"по участку №{debtor['plot']}.\n\n"
                         f"💰 Сумма долга: "
-                        f"{int(debtor['debt'])} ₽\n\n"
-                        "Просим погасить задолженность."
+                        f"{int(debtor['debt'])} ₽"
                     )
 
                     await context.bot.send_message(
@@ -440,7 +444,7 @@ async def start(update, context):
     return ASK_PHONE
 
 # =========================================================
-# ПРОВЕРКА ТЕЛЕФОНА
+# ПРОВЕРКА НОМЕРА
 # =========================================================
 
 async def ask_phone(update, context):
@@ -479,10 +483,6 @@ async def ask_phone(update, context):
             reply_markup=ReplyKeyboardRemove()
         )
 
-        logger.warning(
-            f"Unauthorized access: {phone}"
-        )
-
         return ConversationHandler.END
 
     await update_telegram_id(
@@ -490,7 +490,6 @@ async def ask_phone(update, context):
         update.effective_user.id
     )
 
-    # Приветствие только один раз
     if user[3] == 0:
 
         await update.message.reply_text(
@@ -529,7 +528,7 @@ async def show_menu(update, context):
     return MAIN_MENU
 
 # =========================================================
-# ОБРАБОТКА МЕНЮ
+# МЕНЮ
 # =========================================================
 
 async def handle_menu(update, context):
@@ -582,7 +581,7 @@ async def handle_menu(update, context):
         except FileNotFoundError:
 
             await update.message.reply_text(
-                "📰 Новости пока отсутствуют."
+                "📰 Новости отсутствуют."
             )
 
     # =====================================================
@@ -606,7 +605,7 @@ async def handle_menu(update, context):
         if not debtors:
 
             await update.message.reply_text(
-                "❌ Ошибка загрузки файла."
+                "✅ Должников нет."
             )
 
             return MAIN_MENU
@@ -636,8 +635,7 @@ async def handle_menu(update, context):
         if not can_open_gate(user_id):
 
             await update.message.reply_text(
-                "⏳ Повторное открытие "
-                "возможно через 30 секунд."
+                "⏳ Подождите 30 секунд."
             )
 
             return MAIN_MENU
@@ -647,10 +645,6 @@ async def handle_menu(update, context):
             "совершите звонок:\n\n"
             f"📞 {GATE_PHONE}"
         )
-
-    # =====================================================
-    # НЕИЗВЕСТНАЯ КОМАНДА
-    # =====================================================
 
     else:
 
@@ -676,7 +670,7 @@ async def moderate_chat(update, context):
 
     for word in BAD_WORDS:
 
-        if re.search(rf"{word}", text):
+        if word in text:
 
             try:
 
@@ -703,14 +697,8 @@ async def moderate_chat(update, context):
                     text=(
                         f"⛔ "
                         f"{update.effective_user.full_name} "
-                        f"заблокирован на 24 часа "
-                        f"за нарушение правил чата."
+                        f"заблокирован на 24 часа."
                     )
-                )
-
-                logger.warning(
-                    f"User banned: "
-                    f"{update.effective_user.id}"
                 )
 
             except Exception as e:
@@ -759,6 +747,10 @@ def main():
         .build()
     )
 
+    # =====================================================
+    # CONVERSATION
+    # =====================================================
+
     conv_handler = ConversationHandler(
 
         entry_points=[
@@ -794,32 +786,42 @@ def main():
     app.add_handler(conv_handler)
 
     # =====================================================
-    # МОДЕРАЦИЯ ЧАТА
+    # МОДЕРАЦИЯ
     # =====================================================
 
     app.add_handler(
         MessageHandler(
             filters.TEXT &
-            filters.ChatType.GROUPS,
+            (
+                filters.ChatType.GROUP |
+                filters.ChatType.SUPERGROUP
+            ),
             moderate_chat
         )
     )
 
     # =====================================================
-    # ЕЖЕНЕДЕЛЬНАЯ РАССЫЛКА
-    # ПОНЕДЕЛЬНИК 10:00
+    # JOB QUEUE
     # =====================================================
 
-    app.job_queue.run_weekly(
+    app.job_queue.run_custom(
         weekly_debt_notification,
-        time=time(hour=10, minute=0),
-        days=(0,)
+        job_kwargs={
+            "trigger": CronTrigger(
+                day_of_week="mon",
+                hour=10,
+                minute=0
+            )
+        },
+        name="weekly_debt_notification"
     )
 
     logger.info("Bot started")
 
     app.run_polling()
 
+# =========================================================
+# START APP
 # =========================================================
 
 if __name__ == "__main__":
