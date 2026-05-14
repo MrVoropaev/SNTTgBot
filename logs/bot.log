@@ -1941,3 +1941,33 @@ aiohttp.client_exceptions.ClientConnectorCertificateError: Cannot connect to hos
 2026-05-14 13:35:11,903 | INFO | Application is stopping. This might take a moment.
 2026-05-14 13:35:11,904 | INFO | Scheduler has been shut down
 2026-05-14 13:35:11,915 | INFO | Application.stop() complete
+2026-05-14 13:47:59,493 | INFO | Bot started
+2026-05-14 13:47:59,841 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getMe "HTTP/1.1 200 OK"
+2026-05-14 13:47:59,844 | INFO | Database initialized
+2026-05-14 13:47:59,923 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/deleteWebhook "HTTP/1.1 200 OK"
+2026-05-14 13:47:59,924 | INFO | Scheduler started
+2026-05-14 13:47:59,924 | INFO | Application started
+2026-05-14 13:48:10,202 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:20,285 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:21,513 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:21,835 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:25,225 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:25,227 | INFO | PHONE: +79997737273
+2026-05-14 13:48:25,229 | INFO | USER: (1, '+79997737273', 'Олег Воропаев')
+2026-05-14 13:48:25,231 | INFO | Authorized: +79997737273
+2026-05-14 13:48:25,337 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:25,453 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:27,947 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:28,056 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:29,585 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:29,702 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:31,571 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:31,715 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendPhoto "HTTP/1.1 200 OK"
+2026-05-14 13:48:33,483 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:33,585 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:35,205 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/sendMessage "HTTP/1.1 200 OK"
+2026-05-14 13:48:43,585 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:50,132 | INFO | HTTP Request: POST https://api.telegram.org/bot8738956905:AAEXFFwtZLXljamxHaPP4srUGn4YBcns3O4/getUpdates "HTTP/1.1 200 OK"
+2026-05-14 13:48:50,134 | INFO | Application is stopping. This might take a moment.
+2026-05-14 13:48:50,135 | INFO | Scheduler has been shut down
+2026-05-14 13:48:50,146 | INFO | Application.stop() complete

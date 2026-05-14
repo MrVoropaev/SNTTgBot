@@ -2,8 +2,8 @@ import os
 import logging
 import aiohttp
 import aiosqlite
-import pandas as pd
 import tempfile
+import openpyxl
 
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -27,7 +27,8 @@ from telegram.ext import (
 )
 
 
-
+import sys
+print(sys.executable)
 # =========================================================
 # ЗАГРУЗКА .ENV
 # =========================================================
