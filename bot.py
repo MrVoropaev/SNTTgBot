@@ -19,8 +19,6 @@ from telegram import (
     InlineKeyboardMarkup
 )
 
-from telegram.constants import ChatPermissions
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -37,11 +35,18 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
+
 CHAT_LINK = os.getenv("CHAT_LINK")
+
 DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
 
 GATE_PHONE = os.getenv("GATE_PHONE")
+
+# =========================================================
+# ПРИВЕТСТВИЕ
+# =========================================================
 
 WELCOME_TEXT = """
 Добро пожаловать в сообщество СНТ «Победа» — место, где ценятся добрососедство, взаимопомощь, уважение и любовь к природе.
@@ -82,7 +87,7 @@ ASK_PHONE, MAIN_MENU = range(2)
 LAST_GATE_OPEN = {}
 
 # =========================================================
-# СПИСОК МАТОВ
+# СПИСОК ЗАПРЕЩЕННЫХ СЛОВ
 # =========================================================
 
 BAD_WORDS = [
@@ -92,7 +97,7 @@ BAD_WORDS = [
     "сука",
     "сучка",
     "хуй",
-    "хуйня",
+    "хуи",
     "хуево",
     "хуевый",
     "нахуй",
@@ -121,7 +126,19 @@ BAD_WORDS = [
     "пидор",
     "пидорас",
     "говно",
-    "дерьмо"
+    "дерьмо",
+    "ебанат",
+    "уебан",
+    "заебал",
+    "заебись",
+    "наебал",
+    "еблан",
+    "мудила",
+    "сучара",
+    "хер",
+    "хрен",
+    "говнюк",
+    "дебил"
 ]
 
 # =========================================================
@@ -131,7 +148,8 @@ BAD_WORDS = [
 def normalize_phone(phone: str) -> str:
 
     phone = (
-        phone.replace(" ", "")
+        str(phone)
+        .replace(" ", "")
         .replace("-", "")
         .replace("(", "")
         .replace(")", "")
@@ -165,7 +183,7 @@ def can_open_gate(user_id: int) -> bool:
     return True
 
 # =========================================================
-# ИНИЦИАЛИЗАЦИЯ БД
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ
 # =========================================================
 
 async def init_db():
@@ -204,12 +222,16 @@ async def get_user_by_phone(phone: str):
 # ОБНОВЛЕНИЕ TELEGRAM ID
 # =========================================================
 
-async def update_telegram_id(phone, telegram_id):
+async def update_telegram_id(
+    phone: str,
+    telegram_id: int
+):
 
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute(
-            "UPDATE users SET telegram_id = ? "
+            "UPDATE users "
+            "SET telegram_id = ? "
             "WHERE phone = ?",
             (telegram_id, phone)
         )
@@ -217,15 +239,16 @@ async def update_telegram_id(phone, telegram_id):
         await db.commit()
 
 # =========================================================
-# ПРИВЕТСТВИЕ
+# ПРИВЕТСТВИЕ ПОКАЗАНО
 # =========================================================
 
-async def set_welcomed(phone):
+async def set_welcomed(phone: str):
 
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute(
-            "UPDATE users SET welcomed = 1 "
+            "UPDATE users "
+            "SET welcomed = 1 "
             "WHERE phone = ?",
             (phone,)
         )
@@ -247,6 +270,12 @@ async def load_debtors():
             ) as response:
 
                 if response.status != 200:
+
+                    logger.error(
+                        f"Excel load error: "
+                        f"{response.status}"
+                    )
+
                     return None
 
                 content = await response.read()
@@ -269,6 +298,23 @@ async def load_debtors():
             for col in df.columns
         ]
 
+        required_columns = [
+            "номер участка",
+            "телефон",
+            "сумма взноса",
+            "фактическая сумма"
+        ]
+
+        for column in required_columns:
+
+            if column not in df.columns:
+
+                logger.error(
+                    f"Missing column: {column}"
+                )
+
+                return None
+
         debtors = []
 
         for _, row in df.iterrows():
@@ -276,6 +322,10 @@ async def load_debtors():
             try:
 
                 plot = row["номер участка"]
+
+                phone = normalize_phone(
+                    row["телефон"]
+                )
 
                 required_amount = float(
                     row["сумма взноса"]
@@ -291,22 +341,28 @@ async def load_debtors():
 
                     debtors.append({
                         "plot": plot,
+                        "phone": phone,
                         "debt": debt
                     })
 
-            except:
+            except Exception as e:
+
+                logger.error(e)
+
                 continue
 
         return debtors
 
     except Exception as e:
 
-        logger.error(e)
+        logger.error(
+            f"Debtors load error: {e}"
+        )
 
         return None
 
 # =========================================================
-# УВЕДОМЛЕНИЯ О ДОЛГАХ
+# ЕЖЕНЕДЕЛЬНЫЕ УВЕДОМЛЕНИЯ
 # =========================================================
 
 async def weekly_debt_notification(context):
@@ -316,19 +372,10 @@ async def weekly_debt_notification(context):
     if not debtors:
         return
 
-    message = "⚠️ Напоминание о задолженности\n\n"
-
-    for debtor in debtors:
-
-        message += (
-            f"🏠 Участок: {debtor['plot']}\n"
-            f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
-        )
-
     async with aiosqlite.connect("database.db") as db:
 
         cursor = await db.execute(
-            "SELECT telegram_id "
+            "SELECT telegram_id, phone, name "
             "FROM users "
             "WHERE telegram_id IS NOT NULL"
         )
@@ -337,22 +384,42 @@ async def weekly_debt_notification(context):
 
     for user in users:
 
-        try:
+        telegram_id = user[0]
+        phone = user[1]
+        name = user[2]
 
-            await context.bot.send_message(
-                chat_id=user[0],
-                text=message
-            )
+        for debtor in debtors:
 
-        except Exception as e:
+            if debtor["phone"] == phone:
 
-            logger.error(e)
+                try:
+
+                    message = (
+                        f"⚠️ Уважаемый(ая) {name}\n\n"
+                        f"У вас имеется задолженность "
+                        f"по участку №{debtor['plot']}.\n\n"
+                        f"💰 Сумма долга: "
+                        f"{int(debtor['debt'])} ₽\n\n"
+                        "Просим погасить задолженность."
+                    )
+
+                    await context.bot.send_message(
+                        chat_id=telegram_id,
+                        text=message
+                    )
+
+                except Exception as e:
+
+                    logger.error(e)
 
 # =========================================================
-# СТАРТ
+# START
 # =========================================================
 
 async def start(update, context):
+
+    if not update.message:
+        return ConversationHandler.END
 
     contact_button = KeyboardButton(
         text="📱 Поделиться номером",
@@ -363,7 +430,7 @@ async def start(update, context):
 
     await update.message.reply_text(
         "Здравствуйте!\n\n"
-        "Подтвердите номер телефона.",
+        "Для входа подтвердите номер телефона.",
         reply_markup=ReplyKeyboardMarkup(
             keyboard,
             resize_keyboard=True
@@ -378,12 +445,23 @@ async def start(update, context):
 
 async def ask_phone(update, context):
 
+    if not update.message:
+        return ASK_PHONE
+
     contact = update.message.contact
 
     if not contact:
 
         await update.message.reply_text(
-            "Нажмите кнопку отправки номера."
+            "❌ Нажмите кнопку отправки номера."
+        )
+
+        return ASK_PHONE
+
+    if contact.user_id != update.effective_user.id:
+
+        await update.message.reply_text(
+            "❌ Отправьте свой номер."
         )
 
         return ASK_PHONE
@@ -397,8 +475,12 @@ async def ask_phone(update, context):
     if not user:
 
         await update.message.reply_text(
-            "❌ Номер отсутствует в базе.",
+            "❌ Ваш номер отсутствует в базе СНТ.",
             reply_markup=ReplyKeyboardRemove()
+        )
+
+        logger.warning(
+            f"Unauthorized access: {phone}"
         )
 
         return ConversationHandler.END
@@ -408,6 +490,7 @@ async def ask_phone(update, context):
         update.effective_user.id
     )
 
+    # Приветствие только один раз
     if user[3] == 0:
 
         await update.message.reply_text(
@@ -451,14 +534,20 @@ async def show_menu(update, context):
 
 async def handle_menu(update, context):
 
+    if not update.message:
+        return MAIN_MENU
+
     text = update.message.text
 
+    # =====================================================
     # ВЗНОСЫ
+    # =====================================================
+
     if text == "💰 Взносы":
 
         keyboard = [[
             InlineKeyboardButton(
-                "💳 Оплатить",
+                "💳 Оплатить взнос",
                 url=PAYMENT_LINK
             )
         ]]
@@ -470,7 +559,10 @@ async def handle_menu(update, context):
             )
         )
 
+    # =====================================================
     # НОВОСТИ
+    # =====================================================
+
     elif text == "📰 Новости":
 
         try:
@@ -484,23 +576,29 @@ async def handle_menu(update, context):
                 news = f.read()
 
             await update.message.reply_text(
-                news
+                f"📰 Новости СНТ:\n\n{news}"
             )
 
-        except:
+        except FileNotFoundError:
 
             await update.message.reply_text(
-                "Новостей пока нет."
+                "📰 Новости пока отсутствуют."
             )
 
+    # =====================================================
     # ЧАТ
+    # =====================================================
+
     elif text == "💬 Чат СНТ":
 
         await update.message.reply_text(
-            CHAT_LINK
+            f"💬 Чат СНТ:\n{CHAT_LINK}"
         )
 
+    # =====================================================
     # ДОЛЖНИКИ
+    # =====================================================
+
     elif text == "⚠️ Должники":
 
         debtors = await load_debtors()
@@ -519,14 +617,18 @@ async def handle_menu(update, context):
 
             message += (
                 f"🏠 Участок: {debtor['plot']}\n"
-                f"💰 Долг: {int(debtor['debt'])} ₽\n\n"
+                f"💰 Долг: "
+                f"{int(debtor['debt'])} ₽\n\n"
             )
 
         await update.message.reply_text(
             message
         )
 
+    # =====================================================
     # ВОРОТА
+    # =====================================================
+
     elif text == "🚪 Открыть ворота":
 
         user_id = update.effective_user.id
@@ -534,15 +636,21 @@ async def handle_menu(update, context):
         if not can_open_gate(user_id):
 
             await update.message.reply_text(
-                "⏳ Повторите через 30 секунд."
+                "⏳ Повторное открытие "
+                "возможно через 30 секунд."
             )
 
             return MAIN_MENU
 
         await update.message.reply_text(
             "🚪 Для открытия ворот "
-            f"совершите звонок:\n\n{GATE_PHONE}"
+            "совершите звонок:\n\n"
+            f"📞 {GATE_PHONE}"
         )
+
+    # =====================================================
+    # НЕИЗВЕСТНАЯ КОМАНДА
+    # =====================================================
 
     else:
 
@@ -568,7 +676,7 @@ async def moderate_chat(update, context):
 
     for word in BAD_WORDS:
 
-        if word in text:
+        if re.search(rf"{word}", text):
 
             try:
 
@@ -596,13 +704,20 @@ async def moderate_chat(update, context):
                         f"⛔ "
                         f"{update.effective_user.full_name} "
                         f"заблокирован на 24 часа "
-                        f"за нарушение правил."
+                        f"за нарушение правил чата."
                     )
+                )
+
+                logger.warning(
+                    f"User banned: "
+                    f"{update.effective_user.id}"
                 )
 
             except Exception as e:
 
-                logger.error(e)
+                logger.error(
+                    f"Ban error: {e}"
+                )
 
             return
 
@@ -612,10 +727,12 @@ async def moderate_chat(update, context):
 
 async def cancel(update, context):
 
-    await update.message.reply_text(
-        "До свидания.",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    if update.message:
+
+        await update.message.reply_text(
+            "До свидания.",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
     return ConversationHandler.END
 
@@ -627,7 +744,7 @@ async def post_init(app):
 
     await init_db()
 
-    logger.info("DB initialized")
+    logger.info("Database initialized")
 
 # =========================================================
 # MAIN
@@ -667,13 +784,19 @@ def main():
         },
 
         fallbacks=[
-            CommandHandler("cancel", cancel)
+            CommandHandler(
+                "cancel",
+                cancel
+            )
         ]
     )
 
     app.add_handler(conv_handler)
 
+    # =====================================================
     # МОДЕРАЦИЯ ЧАТА
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
             filters.TEXT &
@@ -682,7 +805,11 @@ def main():
         )
     )
 
-    # ЕЖЕНЕДЕЛЬНОЕ НАПОМИНАНИЕ
+    # =====================================================
+    # ЕЖЕНЕДЕЛЬНАЯ РАССЫЛКА
+    # ПОНЕДЕЛЬНИК 10:00
+    # =====================================================
+
     app.job_queue.run_weekly(
         weekly_debt_notification,
         time=time(hour=10, minute=0),
