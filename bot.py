@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import aiohttp
 import aiosqlite
@@ -14,7 +15,8 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    ChatPermissions
 )
 
 from telegram.ext import (
@@ -26,9 +28,6 @@ from telegram.ext import (
     filters
 )
 
-
-import sys
-print(sys.executable)
 # =========================================================
 # ЗАГРУЗКА .ENV
 # =========================================================
@@ -38,12 +37,14 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK")
 CHAT_LINK = os.getenv("CHAT_LINK")
-DEBTORS_FILE_URL = os.getenv("DEBTORS_FILE_URL")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
 GATE_API_URL = os.getenv("GATE_API_URL")
 GATE_API_KEY = os.getenv("GATE_API_KEY")
 GATE_PHONE = os.getenv("GATE_PHONE")
+
+# ID группы СНТ
+SNT_CHAT_ID = int(os.getenv("SNT_CHAT_ID", "0"))
 
 # =========================================================
 # ЛОГИРОВАНИЕ
@@ -75,6 +76,23 @@ ASK_PHONE, MAIN_MENU = range(2)
 LAST_GATE_OPEN = {}
 
 # =========================================================
+# АНТИМАТ
+# =========================================================
+
+BAD_WORDS = [
+    "хуй",
+    "пизд",
+    "еб",
+    "бля",
+    "сука",
+    "нахуй",
+    "мудак",
+    "долбоеб",
+    "гандон",
+    "уеб"
+]
+
+# =========================================================
 # НОРМАЛИЗАЦИЯ НОМЕРА
 # =========================================================
 
@@ -94,6 +112,33 @@ def normalize_phone(phone: str) -> str:
         phone = "+" + phone
 
     return phone
+
+# =========================================================
+# ПРОВЕРКА НА МАТ
+# =========================================================
+
+def contains_bad_words(text: str) -> bool:
+
+    if not text:
+        return False
+
+    text = text.lower()
+
+    # защита от обхода мата
+    text = text.replace("1", "и")
+    text = text.replace("@", "а")
+    text = text.replace("*", "")
+    text = text.replace("#", "")
+    text = text.replace("$", "с")
+
+    for word in BAD_WORDS:
+
+        pattern = rf"\b{re.escape(word)}\w*\b"
+
+        if re.search(pattern, text):
+            return True
+
+    return False
 
 # =========================================================
 # ПРОВЕРКА RATE LIMIT
@@ -122,6 +167,7 @@ async def init_db():
 
     async with aiosqlite.connect("database.db") as db:
 
+        # пользователи
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,7 +177,53 @@ async def init_db():
             )
         """)
 
+        # предупреждения
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS warnings (
+                user_id INTEGER PRIMARY KEY,
+                warnings INTEGER DEFAULT 0
+            )
+        """)
+
         await db.commit()
+
+# =========================================================
+# ПРЕДУПРЕЖДЕНИЯ
+# =========================================================
+
+async def get_user_warnings(user_id: int) -> int:
+
+    async with aiosqlite.connect("database.db") as db:
+
+        cursor = await db.execute(
+            "SELECT warnings FROM warnings WHERE user_id = ?",
+            (user_id,)
+        )
+
+        row = await cursor.fetchone()
+
+        if row:
+            return row[0]
+
+        return 0
+
+async def add_warning(user_id: int):
+
+    warnings = await get_user_warnings(user_id)
+    warnings += 1
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute("""
+            INSERT INTO warnings(user_id, warnings)
+            VALUES(?, ?)
+            ON CONFLICT(user_id)
+            DO UPDATE SET warnings=excluded.warnings
+        """, (user_id, warnings))
+
+        await db.commit()
+
+    return warnings
 
 # =========================================================
 # ПОИСК ПОЛЬЗОВАТЕЛЯ
@@ -201,59 +293,67 @@ async def open_gate():
         return False
 
 # =========================================================
-# ЗАГРУЗКА ДОЛЖНИКОВ ИЗ EXCEL
+# ЗАГРУЗКА ДОЛЖНИКОВ
 # =========================================================
 
 async def load_debtors_from_excel():
 
     try:
-        if not GOOGLE_SHEETS_ID:
-            return "❌ GOOGLE_SHEETS_ID не задан в .env"
 
-        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=xlsx"
+        if not GOOGLE_SHEETS_ID:
+            return "❌ GOOGLE_SHEETS_ID не задан"
+
+        url = (
+            f"https://docs.google.com/spreadsheets/d/"
+            f"{GOOGLE_SHEETS_ID}/export?format=xlsx"
+        )
 
         async with aiohttp.ClientSession() as session:
+
             async with session.get(url) as response:
 
                 if response.status != 200:
-                    logger.error(f"HTTP error: {response.status}")
-                    return "❌ Не удалось загрузить файл Excel."
+                    return "❌ Ошибка загрузки Excel"
 
                 content = await response.read()
 
-        import tempfile
-        from openpyxl import load_workbook
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".xlsx"
+        ) as tmp:
 
-        # сохраняем файл
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
             tmp.write(content)
             path = tmp.name
 
-        wb = load_workbook(path)
+        wb = openpyxl.load_workbook(path)
         ws = wb.active
 
-        # читаем заголовки
         rows = list(ws.iter_rows(values_only=True))
 
         if not rows:
-            return "❌ Пустой файл."
+            return "❌ Пустой файл"
 
-        headers = [str(h).strip().lower() for h in rows[0]]
+        headers = [
+            str(h).strip().lower()
+            for h in rows[0]
+        ]
 
-        # ищем индексы колонок
         try:
+
             idx_plot = headers.index("номер участка")
             idx_required = headers.index("сумма взноса")
             idx_paid = headers.index("фактическая сумма")
+
         except ValueError:
-            return f"❌ Неверные столбцы: {headers}"
+            return "❌ Неверные названия столбцов"
 
         debtors = []
 
         for row in rows[1:]:
 
             try:
-                plot = str(int(float(row[idx_plot]))).strip()
+
+                plot = str(row[idx_plot]).strip()
 
                 required = float(row[idx_required] or 0)
                 paid = float(row[idx_paid] or 0)
@@ -270,21 +370,156 @@ async def load_debtors_from_excel():
         os.remove(path)
 
         if not debtors:
-            return "✅ Должников нет."
+            return "✅ Должников нет"
 
-        # сортировка по долгу
-        debtors.sort(key=lambda x: x[1], reverse=True)
+        debtors.sort(
+            key=lambda x: x[1],
+            reverse=True
+        )
 
         msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
 
         for plot, debt in debtors:
-            msg += f"🏠 Участок: {plot}\n💰 Долг: {int(debt)} ₽\n\n"
+
+            msg += (
+                f"🏠 Участок: {plot}\n"
+                f"💰 Долг: {int(debt)} ₽\n\n"
+            )
 
         return msg
 
     except Exception as e:
-        logger.error(f"Excel error: {repr(e)}")
-        return f"❌ Ошибка обработки файла: {repr(e)}"
+
+        logger.error(f"Excel error: {e}")
+
+        return "❌ Ошибка обработки файла"
+
+# =========================================================
+# МОДЕРАЦИЯ ЧАТА
+# =========================================================
+
+async def moderate_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    # только сообщения из группы
+    if update.message.chat_id != SNT_CHAT_ID:
+        return
+
+    # только текст
+    if not update.message.text:
+        return
+
+    text = update.message.text
+
+    # проверка мата
+    if not contains_bad_words(text):
+        return
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    user_id = user.id
+
+    # удаляем сообщение
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
+
+    # добавляем предупреждение
+    warnings = await add_warning(user_id)
+
+    username = (
+        f"@{user.username}"
+        if user.username
+        else user.first_name
+    )
+
+    # =====================================================
+    # ПЕРВОЕ НАРУШЕНИЕ
+    # =====================================================
+
+    if warnings == 1:
+
+        await context.bot.send_message(
+            chat_id=SNT_CHAT_ID,
+            text=(
+                f"⚠️ {username}, "
+                "обнаружен мат.\n\n"
+                "Следующее нарушение → мут 3 часа.\n"
+                "Далее → мут 24 часа."
+            )
+        )
+
+    # =====================================================
+    # ВТОРОЕ НАРУШЕНИЕ
+    # =====================================================
+
+    elif warnings == 2:
+
+        until_date = datetime.now() + timedelta(hours=3)
+
+        try:
+
+            await context.bot.restrict_chat_member(
+                chat_id=SNT_CHAT_ID,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False
+                ),
+                until_date=until_date
+            )
+
+            await context.bot.send_message(
+                chat_id=SNT_CHAT_ID,
+                text=(
+                    f"⛔ {username} "
+                    "получил мут на 3 часа "
+                    "за повторный мат."
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Mute error: {e}")
+
+    # =====================================================
+    # ТРЕТЬЕ И ДАЛЕЕ
+    # =====================================================
+
+    else:
+
+        until_date = datetime.now() + timedelta(hours=24)
+
+        try:
+
+            await context.bot.restrict_chat_member(
+                chat_id=SNT_CHAT_ID,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False
+                ),
+                until_date=until_date
+            )
+
+            await context.bot.send_message(
+                chat_id=SNT_CHAT_ID,
+                text=(
+                    f"⛔ {username} "
+                    "получил мут на 24 часа "
+                    "за систематические нарушения."
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Mute error: {e}")
+
 # =========================================================
 # /START
 # =========================================================
@@ -346,21 +581,13 @@ async def ask_phone(
 
     phone = normalize_phone(contact.phone_number)
 
-    logger.info(f"PHONE: {phone}")
-
     user = await get_user_by_phone(phone)
-
-    logger.info(f"USER: {user}")
 
     if not user:
 
         await update.message.reply_text(
             "❌ Ваш номер отсутствует в базе СНТ.",
             reply_markup=ReplyKeyboardRemove()
-        )
-
-        logger.warning(
-            f"Unauthorized access: {phone}"
         )
 
         return ConversationHandler.END
@@ -371,8 +598,6 @@ async def ask_phone(
     )
 
     context.user_data["phone"] = phone
-
-    logger.info(f"Authorized: {phone}")
 
     await update.message.reply_text(
         f"✅ Добро пожаловать, {user[2]}!",
@@ -431,7 +656,7 @@ async def handle_menu(
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "💳 Оплатить через СберБанк",
+                    "💳 Оплатить",
                     url=PAYMENT_LINK
                 )
             ]
@@ -443,33 +668,13 @@ async def handle_menu(
 
         msg = (
             "💰 ВЗНОСЫ СНТ 2026\n\n"
-            "Членский взнос: 15000 ₽\n\n"
-            "Способы оплаты:\n"
-            "• СберБанк Онлайн\n"
-            "• СБП\n"
-            "• Банковская карта\n\n"
-            "Нажмите кнопку ниже для оплаты."
+            "Членский взнос: 15000 ₽"
         )
 
-        if os.path.exists("data/payment_qr.png"):
-
-            with open(
-                "data/payment_qr.png",
-                "rb"
-            ) as qr:
-
-                await update.message.reply_photo(
-                    photo=qr,
-                    caption=msg,
-                    reply_markup=reply_markup
-                )
-
-        else:
-
-            await update.message.reply_text(
-                msg,
-                reply_markup=reply_markup
-            )
+        await update.message.reply_text(
+            msg,
+            reply_markup=reply_markup
+        )
 
     # =====================================================
     # НОВОСТИ
@@ -494,7 +699,7 @@ async def handle_menu(
         except FileNotFoundError:
 
             await update.message.reply_text(
-                "📰 Новости пока отсутствуют."
+                "Новости отсутствуют."
             )
 
     # =====================================================
@@ -514,7 +719,7 @@ async def handle_menu(
     elif text == "⚠️ Должники":
 
         await update.message.reply_text(
-            "📄 Загружаем список должников..."
+            "📄 Загружаем список..."
         )
 
         debtors_message = (
@@ -536,27 +741,17 @@ async def handle_menu(
         if not can_open_gate(user_id):
 
             await update.message.reply_text(
-                "⏳ Повторное открытие возможно "
-                "через 30 секунд."
+                "⏳ Повтор через 30 секунд."
             )
 
             return MAIN_MENU
 
         msg = (
             "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
-            "📱 Для открытия ворот:\n"
-            "1. Нажмите на номер ниже\n"
-            "2. Совершите звонок\n\n"
-            f"📞 {GATE_PHONE}\n\n"
-            "⚠️ Работает только "
-            "в мобильном Telegram."
+            f"📞 {GATE_PHONE}"
         )
 
         await update.message.reply_text(msg)
-
-    # =====================================================
-    # НЕИЗВЕСТНАЯ КОМАНДА
-    # =====================================================
 
     else:
 
@@ -635,7 +830,16 @@ def main():
         ]
     )
 
+    # меню бота
     app.add_handler(conv_handler)
+
+    # модерация чата
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            moderate_chat
+        )
+    )
 
     logger.info("Bot started")
 
