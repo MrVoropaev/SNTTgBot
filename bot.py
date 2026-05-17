@@ -728,8 +728,20 @@ async def handle_menu(
 
     elif text == "💬 Чат СНТ":
 
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "💬 Открыть чат СНТ",
+                    url=CHAT_LINK
+                )
+            ]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await update.message.reply_text(
-            f"💬 Чат СНТ:\n{CHAT_LINK}"
+            "Нажмите кнопку ниже для перехода в чат СНТ:",
+            reply_markup=reply_markup
         )
 
     # =====================================================
