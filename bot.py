@@ -353,7 +353,13 @@ async def load_debtors_from_excel():
 
             try:
 
-                plot = str(row[idx_plot]).strip()
+                plot_value = row[idx_plot]
+
+        # убираем .0
+                if isinstance(plot_value, float) and plot_value.is_integer():
+                    plot = str(int(plot_value))
+                else:
+                    plot = str(plot_value).strip()
 
                 required = float(row[idx_required] or 0)
                 paid = float(row[idx_paid] or 0)
