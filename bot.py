@@ -1,8 +1,23 @@
+# =========================================================
+# TELEGRAM BOT ДЛЯ СНТ
+# =========================================================
+# ФУНКЦИИ:
+# - Авторизация по номеру телефона
+# - Сохранение номера участка
+# - Проверка долгов через Google Sheets
+# - Красивый раздел взносов + QR
+# - Открытие ворот через звонок
+# - Чат СНТ
+# - Предложения председателю
+# - Голосования
+# - Управление голосованиями
+# - Модерация чата
+# - Система предупреждений
+# =========================================================
 
 import os
 import re
-import random
-import asyncio
+import uuid
 import logging
 import aiohttp
 import aiosqlite
@@ -19,7 +34,8 @@ from telegram import (
     ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ChatPermissions
+    ChatPermissions,
+    InputFile
 )
 
 from telegram.ext import (
@@ -27,32 +43,39 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ConversationHandler,
-    ContextTypes,
     CallbackQueryHandler,
+    ContextTypes,
     filters
 )
 
 # =========================================================
-# ЗАГРУЗКА .ENV
+# ENV
 # =========================================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PAYMENT_LINK = os.getenv("PAYMENT_LINK")
-CHAT_LINK = os.getenv("CHAT_LINK")
-GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
-GATE_API_URL = os.getenv("GATE_API_URL")
-GATE_API_KEY = os.getenv("GATE_API_KEY")
+PAYMENT_LINK = os.getenv("PAYMENT_LINK")
+
+CHAT_LINK = os.getenv("CHAT_LINK")
+
+GOOGLE_SHEETS_ID = os.getenv(
+    "GOOGLE_SHEETS_ID"
+)
+
 GATE_PHONE = os.getenv("GATE_PHONE")
 
-SNT_CHAT_ID = int(os.getenv("SNT_CHAT_ID", "0"))
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DEBT_CHECK_HOUR = int(os.getenv("DEBT_CHECK_HOUR", "10"))
+SNT_CHAT_ID = int(
+    os.getenv("SNT_CHAT_ID", "0")
+)
+
+ADMIN_ID = int(
+    os.getenv("ADMIN_ID", "0")
+)
 
 # =========================================================
-# ЛОГИРОВАНИЕ
+# LOGGING
 # =========================================================
 
 os.makedirs("logs", exist_ok=True)
@@ -61,7 +84,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler("logs/bot.log"),
+        logging.FileHandler(
+            "logs/bot.log",
+            encoding="utf-8"
+        ),
         logging.StreamHandler()
     ]
 )
@@ -72,7 +98,18 @@ logger = logging.getLogger(__name__)
 # СОСТОЯНИЯ
 # =========================================================
 
-ASK_PHONE, ASK_PLOT, MAIN_MENU, REQUEST_TEXT = range(4)
+(
+    ASK_PHONE,
+    ASK_PLOT,
+    MAIN_MENU,
+
+    ASK_SUGGESTION,
+
+    POLL_MENU,
+    CREATE_POLL_QUESTION,
+    CREATE_POLL_OPTIONS
+
+) = range(7)
 
 # =========================================================
 # RATE LIMIT
@@ -81,7 +118,15 @@ ASK_PHONE, ASK_PLOT, MAIN_MENU, REQUEST_TEXT = range(4)
 LAST_GATE_OPEN = {}
 
 # =========================================================
-# АНТИМАТ
+# ГОЛОСОВАНИЯ
+# =========================================================
+
+ACTIVE_POLLS = {}
+
+USER_POLLS = {}
+
+# =========================================================
+# МАТ
 # =========================================================
 
 BAD_WORDS = [
@@ -101,7 +146,6 @@ BAD_WORDS = [
 # НОРМАЛИЗАЦИЯ ТЕЛЕФОНА
 # =========================================================
 
-
 def normalize_phone(phone: str) -> str:
 
     phone = (
@@ -120,9 +164,8 @@ def normalize_phone(phone: str) -> str:
     return phone
 
 # =========================================================
-# ПРОВЕРКА НА МАТ
+# ПРОВЕРКА МАТА
 # =========================================================
-
 
 def contains_bad_words(text: str) -> bool:
 
@@ -130,12 +173,6 @@ def contains_bad_words(text: str) -> bool:
         return False
 
     text = text.lower()
-
-    text = text.replace("1", "и")
-    text = text.replace("@", "а")
-    text = text.replace("*", "")
-    text = text.replace("#", "")
-    text = text.replace("$", "с")
 
     for word in BAD_WORDS:
 
@@ -150,8 +187,7 @@ def contains_bad_words(text: str) -> bool:
 # RATE LIMIT ВОРОТ
 # =========================================================
 
-
-def can_open_gate(user_id: int) -> bool:
+def can_open_gate(user_id: int):
 
     now = datetime.now()
 
@@ -167,13 +203,14 @@ def can_open_gate(user_id: int) -> bool:
     return True
 
 # =========================================================
-# ИНИЦИАЛИЗАЦИЯ БД
+# БАЗА ДАННЫХ
 # =========================================================
-
 
 async def init_db():
 
-    async with aiosqlite.connect("database.db") as db:
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -192,26 +229,104 @@ async def init_db():
             )
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS votes (
-                user_id INTEGER PRIMARY KEY,
-                vote TEXT
-            )
-        """)
-
         await db.commit()
 
 # =========================================================
-# ПРЕДУПРЕЖДЕНИЯ
+# USERS
 # =========================================================
 
+async def get_user_by_phone(phone: str):
 
-async def get_user_warnings(user_id: int) -> int:
-
-    async with aiosqlite.connect("database.db") as db:
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
 
         cursor = await db.execute(
-            "SELECT warnings FROM warnings WHERE user_id = ?",
+            """
+            SELECT id, phone, name
+            FROM users
+            WHERE phone = ?
+            """,
+            (phone,)
+        )
+
+        return await cursor.fetchone()
+
+async def update_telegram_id(
+    phone: str,
+    telegram_id: int
+):
+
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
+
+        await db.execute(
+            """
+            UPDATE users
+            SET telegram_id = ?
+            WHERE phone = ?
+            """,
+            (telegram_id, phone)
+        )
+
+        await db.commit()
+
+async def update_user_plot(
+    phone: str,
+    plot: str
+):
+
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
+
+        await db.execute(
+            """
+            UPDATE users
+            SET plot = ?
+            WHERE phone = ?
+            """,
+            (plot, phone)
+        )
+
+        await db.commit()
+
+async def get_user_by_telegram_id(
+    telegram_id: int
+):
+
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
+
+        cursor = await db.execute(
+            """
+            SELECT phone, name, plot
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,)
+        )
+
+        return await cursor.fetchone()
+
+# =========================================================
+# WARNINGS
+# =========================================================
+
+async def get_user_warnings(user_id: int):
+
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
+
+        cursor = await db.execute(
+            """
+            SELECT warnings
+            FROM warnings
+            WHERE user_id = ?
+            """,
             (user_id,)
         )
 
@@ -222,19 +337,28 @@ async def get_user_warnings(user_id: int) -> int:
 
         return 0
 
-
 async def add_warning(user_id: int):
 
-    warnings = await get_user_warnings(user_id)
+    warnings = await get_user_warnings(
+        user_id
+    )
+
     warnings += 1
 
-    async with aiosqlite.connect("database.db") as db:
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
 
         await db.execute("""
-            INSERT INTO warnings(user_id, warnings)
+            INSERT INTO warnings(
+                user_id,
+                warnings
+            )
             VALUES(?, ?)
+
             ON CONFLICT(user_id)
-            DO UPDATE SET warnings=excluded.warnings
+            DO UPDATE SET
+            warnings=excluded.warnings
         """, (user_id, warnings))
 
         await db.commit()
@@ -242,119 +366,126 @@ async def add_warning(user_id: int):
     return warnings
 
 # =========================================================
-# ПОЛЬЗОВАТЕЛИ
+# DOWNLOAD EXCEL
 # =========================================================
-
-
-async def get_user_by_phone(phone: str):
-
-    async with aiosqlite.connect("database.db") as db:
-
-        cursor = await db.execute(
-            "SELECT id, phone, name FROM users WHERE phone = ?",
-            (phone,)
-        )
-
-        return await cursor.fetchone()
-
-
-async def update_telegram_id(phone: str, telegram_id: int):
-
-    async with aiosqlite.connect("database.db") as db:
-
-        await db.execute(
-            "UPDATE users SET telegram_id = ? WHERE phone = ?",
-            (telegram_id, phone)
-        )
-
-        await db.commit()
-
-
-async def update_user_plot(phone: str, plot: str):
-
-    async with aiosqlite.connect("database.db") as db:
-
-        await db.execute(
-            "UPDATE users SET plot = ? WHERE phone = ?",
-            (plot, phone)
-        )
-
-        await db.commit()
-
-
-async def get_user_by_telegram_id(telegram_id: int):
-
-    async with aiosqlite.connect("database.db") as db:
-
-        cursor = await db.execute(
-            "SELECT phone, name, plot FROM users WHERE telegram_id = ?",
-            (telegram_id,)
-        )
-
-        return await cursor.fetchone()
-
-# =========================================================
-# ВОРОТА
-# =========================================================
-
-
-async def open_gate():
-
-    headers = {
-        "Authorization": f"Bearer {GATE_API_KEY}"
-    }
-
-    try:
-
-        async with aiohttp.ClientSession() as session:
-
-            async with session.post(
-                GATE_API_URL,
-                headers=headers,
-                timeout=10
-            ) as response:
-
-                return response.status == 200
-
-    except Exception as e:
-
-        logger.error(f"Gate open failed: {e}")
-
-        return False
-
-# =========================================================
-# ЗАГРУЗКА EXCEL
-# =========================================================
-
 
 async def download_excel():
 
-    url = (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{GOOGLE_SHEETS_ID}/export?format=xlsx"
-    )
+    try:
 
-    async with aiohttp.ClientSession() as session:
+        url = (
+            f"https://docs.google.com/spreadsheets/d/"
+            f"{GOOGLE_SHEETS_ID}/export?format=xlsx"
+        )
 
-        async with session.get(url) as response:
+        async with aiohttp.ClientSession() as session:
 
-            if response.status != 200:
-                return None
+            async with session.get(url) as response:
 
-            content = await response.read()
+                if response.status != 200:
+                    return None
 
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=".xlsx"
-    ) as tmp:
+                content = await response.read()
 
-        tmp.write(content)
-        return tmp.name
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".xlsx"
+        ) as tmp:
+
+            tmp.write(content)
+
+            return tmp.name
+
+    except Exception as e:
+
+        logger.error(
+            f"download_excel: {e}"
+        )
+
+        return None
+
+# =========================================================
+# МОЙ ДОЛГ
+# =========================================================
+
+async def get_personal_debt(plot: str):
+
+    try:
+
+        path = await download_excel()
+
+        if not path:
+            return None
+
+        wb = openpyxl.load_workbook(path)
+
+        ws = wb.active
+
+        rows = list(
+            ws.iter_rows(values_only=True)
+        )
+
+        headers = [
+            str(h).strip().lower()
+            for h in rows[0]
+        ]
+
+        idx_plot = headers.index(
+            "номер участка"
+        )
+
+        idx_required = headers.index(
+            "сумма взноса"
+        )
+
+        idx_paid = headers.index(
+            "фактическая сумма"
+        )
+
+        for row in rows[1:]:
+
+            row_plot = row[idx_plot]
+
+            if isinstance(row_plot, float):
+                row_plot = str(int(row_plot))
+            else:
+                row_plot = str(row_plot).strip()
+
+            if row_plot == str(plot):
+
+                required = float(
+                    row[idx_required] or 0
+                )
+
+                paid = float(
+                    row[idx_paid] or 0
+                )
+
+                debt = int(required - paid)
+
+                wb.close()
+
+                os.remove(path)
+
+                return max(0, debt)
+
+        wb.close()
+
+        os.remove(path)
+
+        return 0
+
+    except Exception as e:
+
+        logger.error(
+            f"personal debt: {e}"
+        )
+
+        return None
 
 # =========================================================
 # ДОЛЖНИКИ
 # =========================================================
-
 
 async def load_debtors_from_excel():
 
@@ -366,18 +497,29 @@ async def load_debtors_from_excel():
             return "❌ Ошибка загрузки файла"
 
         wb = openpyxl.load_workbook(path)
+
         ws = wb.active
 
-        rows = list(ws.iter_rows(values_only=True))
+        rows = list(
+            ws.iter_rows(values_only=True)
+        )
 
         headers = [
             str(h).strip().lower()
             for h in rows[0]
         ]
 
-        idx_plot = headers.index("номер участка")
-        idx_required = headers.index("сумма взноса")
-        idx_paid = headers.index("фактическая сумма")
+        idx_plot = headers.index(
+            "номер участка"
+        )
+
+        idx_required = headers.index(
+            "сумма взноса"
+        )
+
+        idx_paid = headers.index(
+            "фактическая сумма"
+        )
 
         debtors = []
 
@@ -392,168 +534,66 @@ async def load_debtors_from_excel():
                 else:
                     plot = str(plot_value).strip()
 
-                required = float(row[idx_required] or 0)
-                paid = float(row[idx_paid] or 0)
+                required = float(
+                    row[idx_required] or 0
+                )
 
-                debt = required - paid
+                paid = float(
+                    row[idx_paid] or 0
+                )
+
+                debt = int(required - paid)
 
                 if debt > 0:
-                    debtors.append((plot, int(debt)))
 
-            except Exception:
+                    debtors.append(
+                        (plot, debt)
+                    )
+
+            except:
                 continue
 
         wb.close()
+
         os.remove(path)
 
         if not debtors:
             return "✅ Должников нет"
 
-        debtors.sort(key=lambda x: x[1], reverse=True)
+        debtors.sort(
+            key=lambda x: x[1],
+            reverse=True
+        )
 
-        msg = "⚠️ ДОЛЖНИКИ СНТ\n\n"
+        msg = (
+            "⚠️ СПИСОК ДОЛЖНИКОВ СНТ\n\n"
+        )
 
         for plot, debt in debtors:
 
             msg += (
                 f"🏠 Участок: {plot}\n"
-                f"💰 Долг: {debt} ₽\n\n"
+                f"💰 Долг: {debt:,} ₽\n\n"
             )
 
         return msg
 
     except Exception as e:
 
-        logger.error(f"Debtors error: {e}")
+        logger.error(
+            f"debtors: {e}"
+        )
 
         return "❌ Ошибка обработки файла"
-
-# =========================================================
-# ПЕРСОНАЛЬНЫЙ ДОЛГ
-# =========================================================
-
-
-async def get_personal_debt(plot: str):
-
-    try:
-
-        path = await download_excel()
-
-        if not path:
-            return None
-
-        wb = openpyxl.load_workbook(path)
-        ws = wb.active
-
-        rows = list(ws.iter_rows(values_only=True))
-
-        headers = [
-            str(h).strip().lower()
-            for h in rows[0]
-        ]
-
-        idx_plot = headers.index("номер участка")
-        idx_required = headers.index("сумма взноса")
-        idx_paid = headers.index("фактическая сумма")
-
-        for row in rows[1:]:
-
-            row_plot = row[idx_plot]
-
-            if isinstance(row_plot, float):
-                row_plot = str(int(row_plot))
-            else:
-                row_plot = str(row_plot).strip()
-
-            if row_plot == str(plot):
-
-                required = float(row[idx_required] or 0)
-                paid = float(row[idx_paid] or 0)
-
-                debt = int(required - paid)
-
-                wb.close()
-                os.remove(path)
-
-                return max(0, debt)
-
-        wb.close()
-        os.remove(path)
-
-        return 0
-
-    except Exception as e:
-
-        logger.error(f"Personal debt error: {e}")
-
-        return None
-
-# =========================================================
-# АВТОНАПОМИНАНИЯ
-# =========================================================
-
-
-async def debt_notifications_loop(app: Application):
-
-    await asyncio.sleep(15)
-
-    while True:
-
-        try:
-
-            now = datetime.now()
-
-            if now.hour == DEBT_CHECK_HOUR and now.minute == 0:
-
-                async with aiosqlite.connect("database.db") as db:
-
-                    cursor = await db.execute(
-                        "SELECT telegram_id, plot FROM users WHERE telegram_id IS NOT NULL AND plot IS NOT NULL"
-                    )
-
-                    users = await cursor.fetchall()
-
-                for telegram_id, plot in users:
-
-                    debt = await get_personal_debt(plot)
-
-                    if debt and debt > 0:
-
-                        try:
-
-                            await asyncio.sleep(
-                                random.randint(10, 60)
-                            )
-
-                            await app.bot.send_message(
-                                chat_id=telegram_id,
-                                text=(
-                                    f"⚠️ Напоминание СНТ\n\n"
-                                    f"🏠 Участок: {plot}\n"
-                                    f"💰 Задолженность: {debt} ₽\n\n"
-                                    "Просим оплатить задолженность."
-                                )
-                            )
-
-                        except Exception as e:
-
-                            logger.error(f"Notify error: {e}")
-
-                await asyncio.sleep(3600)
-
-            await asyncio.sleep(60)
-
-        except Exception as e:
-
-            logger.error(f"Debt loop error: {e}")
-            await asyncio.sleep(60)
 
 # =========================================================
 # МОДЕРАЦИЯ
 # =========================================================
 
-
-async def moderate_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def moderate_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not update.message:
         return
@@ -571,15 +611,12 @@ async def moderate_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
-    if not user:
-        return
-
     user_id = user.id
 
     try:
         await update.message.delete()
-    except Exception as e:
-        logger.error(f"Delete error: {e}")
+    except:
+        pass
 
     warnings = await add_warning(user_id)
 
@@ -594,63 +631,34 @@ async def moderate_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=SNT_CHAT_ID,
             text=(
-                f"⚠️ {username}, обнаружен мат.\n\n"
-                "Следующее нарушение → мут 3 часа."
+                f"⚠️ {username}, предупреждение за мат."
             )
         )
 
-    elif warnings == 2:
+    elif warnings >= 2:
 
-        until_date = datetime.now() + timedelta(hours=3)
+        until_date = (
+            datetime.now() +
+            timedelta(hours=3)
+        )
 
-        try:
-
-            await context.bot.restrict_chat_member(
-                chat_id=SNT_CHAT_ID,
-                user_id=user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=False
-                ),
-                until_date=until_date
-            )
-
-            await context.bot.send_message(
-                chat_id=SNT_CHAT_ID,
-                text=f"⛔ {username} получил мут на 3 часа"
-            )
-
-        except Exception as e:
-            logger.error(f"Mute error: {e}")
-
-    else:
-
-        until_date = datetime.now() + timedelta(hours=24)
-
-        try:
-
-            await context.bot.restrict_chat_member(
-                chat_id=SNT_CHAT_ID,
-                user_id=user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=False
-                ),
-                until_date=until_date
-            )
-
-            await context.bot.send_message(
-                chat_id=SNT_CHAT_ID,
-                text=f"⛔ {username} получил мут на 24 часа"
-            )
-
-        except Exception as e:
-            logger.error(f"Mute error: {e}")
+        await context.bot.restrict_chat_member(
+            chat_id=SNT_CHAT_ID,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False
+            ),
+            until_date=until_date
+        )
 
 # =========================================================
 # START
 # =========================================================
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     contact_button = KeyboardButton(
         text="📱 Поделиться номером",
@@ -665,48 +673,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "Здравствуйте!\n\nПодтвердите номер телефона.",
+        (
+            "🏡 ДОБРО ПОЖАЛОВАТЬ В СНТ\n\n"
+            "Для продолжения подтвердите номер телефона."
+        ),
         reply_markup=reply_markup
     )
 
     return ASK_PHONE
 
 # =========================================================
-# ПРОВЕРКА ТЕЛЕФОНА
+# PHONE
 # =========================================================
 
-
-async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not update.message:
-        return ASK_PHONE
+async def ask_phone(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     contact = update.message.contact
 
     if not contact:
 
         await update.message.reply_text(
-            "❌ Нажмите кнопку подтверждения номера"
+            "❌ Используйте кнопку ниже."
         )
 
         return ASK_PHONE
 
-    if contact.user_id != update.effective_user.id:
-
-        await update.message.reply_text(
-            "❌ Отправьте свой номер"
-        )
-
-        return ASK_PHONE
-
-    phone = normalize_phone(contact.phone_number)
+    phone = normalize_phone(
+        contact.phone_number
+    )
 
     user = await get_user_by_phone(phone)
 
     if not user:
 
         await update.message.reply_text(
-            "❌ Ваш номер отсутствует в базе СНТ",
+            (
+                "❌ Ваш номер отсутствует "
+                "в базе СНТ."
+            ),
             reply_markup=ReplyKeyboardRemove()
         )
 
@@ -723,43 +730,77 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Добро пожаловать, {user[2]}!"
     )
 
+    async with aiosqlite.connect(
+        "database.db"
+    ) as db:
+
+        cursor = await db.execute(
+            """
+            SELECT plot
+            FROM users
+            WHERE phone = ?
+            """,
+            (phone,)
+        )
+
+        row = await cursor.fetchone()
+
+    if row and row[0]:
+
+        return await show_main_menu(
+            update,
+            context
+        )
+
     await update.message.reply_text(
-        "🏠 Введите номер участка:"
+        "🏠 Введите номер участка."
     )
 
     return ASK_PLOT
 
 # =========================================================
-# НОМЕР УЧАСТКА
+# УЧАСТОК
 # =========================================================
 
-
-async def ask_plot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_plot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     plot = update.message.text.strip()
 
-    phone = context.user_data.get("phone")
-
-    await update_user_plot(phone, plot)
-
-    await update.message.reply_text(
-        f"✅ Участок {plot} сохранён"
+    phone = context.user_data.get(
+        "phone"
     )
 
-    return await show_main_menu(update, context)
+    await update_user_plot(
+        phone,
+        plot
+    )
+
+    await update.message.reply_text(
+        f"✅ Участок №{plot} сохранён."
+    )
+
+    return await show_main_menu(
+        update,
+        context
+    )
 
 # =========================================================
 # ГЛАВНОЕ МЕНЮ
 # =========================================================
 
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_main_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     keyboard = [
-        ["💰 Взносы", "📰 Новости"],
-        ["💬 Чат СНТ", "🚪 Открыть ворота"],
-        ["⚠️ Должники", "💳 Мой долг"],
-        ["🛠 Заявка", "🗳 Голосования"]
+        ["💰 Взносы", "💳 Мой долг"],
+        ["⚠️ Должники", "💬 Чат СНТ"],
+        ["🚪 Открыть ворота", "📝 Предложения"],
+        ["📊 Голосования"]
     ]
 
     reply_markup = ReplyKeyboardMarkup(
@@ -767,200 +808,575 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True
     )
 
+    context.user_data["current_state"] = MAIN_MENU
     await update.message.reply_text(
-        "Выберите раздел:",
+        (
+            "📋 ГЛАВНОЕ МЕНЮ\n\n"
+            "Выберите нужный раздел."
+        ),
         reply_markup=reply_markup
     )
 
     return MAIN_MENU
 
 # =========================================================
-# ЗАЯВКИ
+# ВЗНОСЫ
 # =========================================================
 
-
-async def request_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    text = update.message.text
+async def show_payment_section(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = await get_user_by_telegram_id(
         update.effective_user.id
     )
 
-    if not user:
-        return MAIN_MENU
-
-    name = user[1]
     plot = user[2]
 
-    msg = (
-        f"🛠 НОВАЯ ЗАЯВКА\n\n"
-        f"👤 {name}\n"
-        f"🏠 Участок: {plot}\n\n"
-        f"📄 {text}"
+    debt = await get_personal_debt(plot)
+
+    if debt is None:
+
+        await update.message.reply_text(
+            "❌ Ошибка загрузки данных."
+        )
+
+        return
+
+    if debt <= 0:
+
+        caption = (
+            "💚 ВЗНОСЫ СНТ\n\n"
+            f"🏠 Участок: {plot}\n\n"
+            "✅ Задолженность отсутствует."
+        )
+
+    else:
+
+        caption = (
+            "💰 ОПЛАТА ВЗНОСОВ СНТ\n\n"
+            f"🏠 Участок: {plot}\n\n"
+            f"💳 Текущий долг: {debt:,} ₽\n\n"
+            "📌 Для оплаты:\n"
+            "• Отсканируйте QR-код\n"
+            "• Или нажмите кнопку ниже"
+        )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💳 ОПЛАТИТЬ ВЗНОСЫ",
+                url=PAYMENT_LINK
+            )
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(
+        keyboard
     )
 
-    try:
+    qr_path = "data/payment_qr.png"
 
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=msg
+    if os.path.exists(qr_path):
+
+        with open(qr_path, "rb") as qr:
+
+            await update.message.reply_photo(
+                photo=InputFile(qr),
+                caption=caption,
+                reply_markup=reply_markup
+            )
+
+    else:
+
+        await update.message.reply_text(
+            caption,
+            reply_markup=reply_markup
+        )
+
+# =========================================================
+# ПРЕДЛОЖЕНИЯ
+# =========================================================
+
+async def start_suggestion(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        (
+            "📝 Напишите предложение "
+            "председателю СНТ."
+        )
+    )
+
+    return ASK_SUGGESTION
+
+async def save_suggestion(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = update.message.text
+
+    user = update.effective_user
+
+    sender = (
+        f"@{user.username}"
+        if user.username
+        else user.full_name
+    )
+
+    message = (
+        "📝 НОВОЕ ПРЕДЛОЖЕНИЕ\n\n"
+        f"👤 От: {sender}\n"
+        f"🆔 ID: {user.id}\n\n"
+        f"{text}"
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=message
+    )
+
+    await update.message.reply_text(
+        "✅ Предложение отправлено."
+    )
+
+    return await show_main_menu(
+        update,
+        context
+    )
+
+# =========================================================
+# МЕНЮ ГОЛОСОВАНИЙ
+# =========================================================
+
+async def poll_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user_id = update.effective_user.id
+
+    keyboard = []
+
+    if user_id in USER_POLLS:
+
+        keyboard.append(
+            ["⚙️ Управлять голосованием"]
+        )
+
+    else:
+
+        keyboard.append(
+            ["➕ Создать голосование"]
+        )
+
+    keyboard.append(
+        ["📋 Доступные голосования"]
+    )
+
+    keyboard.append(
+        ["⬅️ Назад"]
+    )
+
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
+    )
+
+    context.user_data["current_state"] = POLL_MENU
+    await update.message.reply_text(
+        (
+            "📊 РАЗДЕЛ ГОЛОСОВАНИЙ\n\n"
+            "Выберите действие."
+        ),
+        reply_markup=reply_markup
+    )
+
+    context.user_data["current_state"] = POLL_MENU
+
+    return POLL_MENU    
+
+# =========================================================
+# СОЗДАНИЕ ГОЛОСОВАНИЯ
+# =========================================================
+
+async def start_poll_creation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        (
+            "❓ Напишите вопрос голосования.\n\n"
+            "Например:\n"
+            "Нужно ли установить больше камер?"
+        )
+    )
+
+    context.user_data["current_state"] = CREATE_POLL_QUESTION
+
+    return CREATE_POLL_QUESTION
+
+# =========================================================
+# ВОПРОС ГОЛОСОВАНИЯ
+# =========================================================
+
+async def create_poll_question(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["poll_question"] = (
+        update.message.text.strip()
+    )
+
+    await update.message.reply_text(
+        (
+            "✍️ Напишите варианты ответа "
+            "через запятую.\n\n"
+            "Например:\n"
+            "Да, Нет, Воздержался"
+        )
+    )
+
+    context.user_data["current_state"] = CREATE_POLL_OPTIONS
+
+    return CREATE_POLL_OPTIONS
+
+# =========================================================
+# СОЗДАНИЕ ВАРИАНТОВ
+# =========================================================
+
+async def create_poll_options(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user_id = update.effective_user.id
+
+    question = context.user_data.get(
+        "poll_question"
+    )
+
+    options = [
+        x.strip()
+        for x in update.message.text.split(",")
+        if x.strip()
+    ]
+
+    if len(options) < 2:
+
+        await update.message.reply_text(
+            "❌ Минимум 2 варианта."
+        )
+
+        return CREATE_POLL_OPTIONS
+
+    poll_id = str(uuid.uuid4())[:8]
+
+    ACTIVE_POLLS[poll_id] = {
+
+        "creator_id": user_id,
+
+        "question": question,
+
+        "options": options,
+
+        "votes": {},
+
+        "active": True
+    }
+
+    USER_POLLS[user_id] = poll_id
+
+    await update.message.reply_text(
+        (
+            "✅ Голосование успешно создано.\n\n"
+            "Теперь оно отображается "
+            "в разделе доступных голосований."
+        )
+    )
+
+    return await poll_menu(
+        update,
+        context
+    )
+
+# =========================================================
+# СПИСОК ГОЛОСОВАНИЙ
+# =========================================================
+
+async def show_polls(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    active = []
+
+    for poll_id, poll in ACTIVE_POLLS.items():
+
+        if poll["active"]:
+            active.append((poll_id, poll))
+
+    if not active:
+
+        await update.message.reply_text(
+            "📭 Доступных голосований нет."
+        )
+
+        return POLL_MENU
+
+    for poll_id, poll in active:
+
+        keyboard = []
+
+        for index, option in enumerate(
+            poll["options"]
+        ):
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=option,
+                    callback_data=(
+                        f"vote:{poll_id}:{index}"
+                    )
+                )
+            ])
+
+        reply_markup = InlineKeyboardMarkup(
+            keyboard
         )
 
         await update.message.reply_text(
-            "✅ Заявка отправлена председателю"
+            (
+                "📊 ГОЛОСОВАНИЕ\n\n"
+                f"❓ {poll['question']}"
+            ),
+            reply_markup=reply_markup
         )
 
-    except Exception as e:
-
-        logger.error(f"Request error: {e}")
-
-        await update.message.reply_text(
-            "❌ Ошибка отправки"
-        )
-
-    return MAIN_MENU
+    return POLL_MENU
 
 # =========================================================
-# ГОЛОСОВАНИЯ
+# CALLBACK ГОЛОСОВАНИЯ
 # =========================================================
 
-
-async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vote_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    user_id = query.from_user.id
+    data = query.data.split(":")
 
-    vote = (
-        "Да"
-        if query.data == "vote_yes"
-        else "Нет"
-    )
+    poll_id = data[1]
 
-    async with aiosqlite.connect("database.db") as db:
+    option_index = int(data[2])
 
-        cursor = await db.execute(
-            "SELECT vote FROM votes WHERE user_id = ?",
-            (user_id,)
+    user = query.from_user
+
+    user_id = user.id
+
+    if poll_id not in ACTIVE_POLLS:
+
+        await query.answer(
+            "❌ Голосование не найдено.",
+            show_alert=True
         )
 
-        existing = await cursor.fetchone()
+        return
 
-        if existing:
+    poll = ACTIVE_POLLS[poll_id]
 
-            await query.edit_message_text(
-                "⚠️ Вы уже голосовали"
+    if not poll["active"]:
+
+        await query.answer(
+            "❌ Голосование завершено.",
+            show_alert=True
+        )
+
+        return
+
+    poll["votes"][user_id] = {
+
+        "option": option_index,
+
+        "name": user.full_name
+    }
+
+    await query.answer(
+        "✅ Спасибо за ваш голос!",
+        show_alert=True
+    )
+
+# =========================================================
+# УПРАВЛЕНИЕ ГОЛОСОВАНИЕМ
+# =========================================================
+
+async def manage_poll(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user_id = update.effective_user.id
+
+    if user_id not in USER_POLLS:
+
+        await update.message.reply_text(
+            "❌ У вас нет активного голосования."
+        )
+
+        return POLL_MENU
+
+    poll_id = USER_POLLS[user_id]
+
+    poll = ACTIVE_POLLS[poll_id]
+
+    report = (
+        "📊 ВАШЕ ГОЛОСОВАНИЕ\n\n"
+        f"❓ {poll['question']}\n\n"
+    )
+
+    if not poll["votes"]:
+
+        report += (
+            "📭 Пока никто не голосовал.\n"
+        )
+
+    else:
+
+        for vote in poll["votes"].values():
+
+            option = poll["options"][
+                vote["option"]
+            ]
+
+            report += (
+                f"👤 {vote['name']} → "
+                f"{option}\n"
             )
 
-            return
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "❌ ЗАВЕРШИТЬ ГОЛОСОВАНИЕ",
+                callback_data=f"closepoll:{poll_id}"
+            )
+        ]
+    ]
 
-        await db.execute(
-            "INSERT INTO votes(user_id, vote) VALUES(?, ?)",
-            (user_id, vote)
-        )
+    reply_markup = InlineKeyboardMarkup(
+        keyboard
+    )
 
-        await db.commit()
+    await update.message.reply_text(
+        report,
+        reply_markup=reply_markup
+    )
 
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM votes WHERE vote='Да'"
-        )
+    context.user_data["current_state"] = POLL_MENU
 
-        yes_count = (await cursor.fetchone())[0]
+    return POLL_MENU
 
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM votes WHERE vote='Нет'"
-        )
+    
+# =========================================================
+# ЗАВЕРШЕНИЕ ГОЛОСОВАНИЯ
+# =========================================================
 
-        no_count = (await cursor.fetchone())[0]
+async def close_poll_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    await query.edit_message_text(
-        (
-            f"✅ Ваш голос: {vote}\n\n"
-            f"📊 Результаты:\n"
-            f"Да: {yes_count}\n"
-            f"Нет: {no_count}"
-        )
+    query = update.callback_query
+
+    await query.answer()
+
+    poll_id = query.data.split(":")[1]
+
+    if poll_id not in ACTIVE_POLLS:
+        return
+
+    poll = ACTIVE_POLLS[poll_id]
+
+    poll["active"] = False
+
+    creator_id = poll["creator_id"]
+
+    if creator_id in USER_POLLS:
+        del USER_POLLS[creator_id]
+
+    await query.message.reply_text(
+        "✅ Голосование завершено."
     )
 
 # =========================================================
-# ОБРАБОТКА МЕНЮ
+# ВОРОТА
 # =========================================================
 
+async def open_gate(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not can_open_gate(user_id):
+
+        await update.message.reply_text(
+            (
+                "⏳ Повторный звонок "
+                "доступен через 30 секунд."
+            )
+        )
+
+        return MAIN_MENU
+
+    # Telegram Bot API НЕ поддерживает tel:
+    # поэтому просто показываем номер
+
+    text = (
+        "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
+        "📱 Для открытия ворот:\n\n"
+        f"☎️ Позвоните на номер:\n"
+        f"{GATE_PHONE}\n\n"
+        "❗️Функция звонка работает "
+        "только в мобильной версии Telegram.\n\n"
+        "Скопируйте номер или нажмите на него."
+    )
+
+    await update.message.reply_text(text)
+
+    return MAIN_MENU
+
+# =========================================================
+# HANDLE MENU
+# =========================================================
+
+async def handle_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     text = update.message.text
 
+    # ВЗНОСЫ
+
     if text == "💰 Взносы":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "💳 Оплатить",
-                    url=PAYMENT_LINK
-                )
-            ]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            "💰 Оплата взносов СНТ",
-            reply_markup=reply_markup
+        await show_payment_section(
+            update,
+            context
         )
 
-    elif text == "📰 Новости":
-
-        try:
-
-            with open(
-                "data/news.txt",
-                "r",
-                encoding="utf-8"
-            ) as f:
-
-                news = f.read()
-
-            await update.message.reply_text(
-                f"📰 Новости СНТ:\n\n{news}"
-            )
-
-        except FileNotFoundError:
-
-            await update.message.reply_text(
-                "Новости отсутствуют"
-            )
-
-    elif text == "💬 Чат СНТ":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "💬 Открыть чат",
-                    url=CHAT_LINK
-                )
-            ]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            "Нажмите кнопку ниже:",
-            reply_markup=reply_markup
-        )
-
-    elif text == "⚠️ Должники":
-
-        await update.message.reply_text(
-            "📄 Загружаем список..."
-        )
-
-        debtors_message = await load_debtors_from_excel()
-
-        await update.message.reply_text(debtors_message)
+    # МОЙ ДОЛГ
 
     elif text == "💳 Мой долг":
 
@@ -968,103 +1384,141 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_user.id
         )
 
-        if not user:
-
-            await update.message.reply_text(
-                "❌ Пользователь не найден"
-            )
-
-            return MAIN_MENU
-
         plot = user[2]
 
         debt = await get_personal_debt(plot)
 
-        if debt is None:
+        if debt <= 0:
 
             await update.message.reply_text(
-                "❌ Ошибка загрузки"
-            )
-
-        elif debt <= 0:
-
-            await update.message.reply_text(
-                f"✅ У участка {plot} задолженности нет"
+                (
+                    f"🏠 Участок: {plot}\n\n"
+                    "✅ Долгов нет."
+                )
             )
 
         else:
 
             await update.message.reply_text(
                 (
-                    f"🏠 Участок: {plot}\n"
-                    f"💰 Задолженность: {debt} ₽"
+                    f"🏠 Участок: {plot}\n\n"
+                    f"💰 Долг: {debt:,} ₽"
                 )
             )
 
-    elif text == "🛠 Заявка":
+    # ДОЛЖНИКИ
 
-        await update.message.reply_text(
-            "📝 Опишите проблему одним сообщением"
+    elif text == "⚠️ Должники":
+
+        loading = await update.message.reply_text(
+            "📄 Загружаем список..."
         )
 
-        return REQUEST_TEXT
+        msg = await load_debtors_from_excel()
 
-    elif text == "🗳 Голосования":
+        await loading.delete()
+
+        await update.message.reply_text(msg)
+
+    # ЧАТ
+
+    elif text == "💬 Чат СНТ":
 
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "✅ Да",
-                    callback_data="vote_yes"
-                ),
-                InlineKeyboardButton(
-                    "❌ Нет",
-                    callback_data="vote_no"
+                    "💬 ОТКРЫТЬ ЧАТ",
+                    url=CHAT_LINK
                 )
             ]
         ]
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = InlineKeyboardMarkup(
+            keyboard
+        )
 
         await update.message.reply_text(
             (
-                "🗳 ГОЛОСОВАНИЕ\n\n"
-                "Установить дополнительные камеры?"
+                "💬 ЧАТ СНТ\n\n"
+                "Нажмите кнопку ниже "
+                "для перехода в чат."
             ),
             reply_markup=reply_markup
         )
 
+    # ВОРОТА
+
     elif text == "🚪 Открыть ворота":
 
-        user_id = update.effective_user.id
-
-        if not can_open_gate(user_id):
-
-            await update.message.reply_text(
-                "⏳ Повторное открытие через 30 секунд"
-            )
-
-            return MAIN_MENU
-
-        msg = (
-            "🚪 ОТКРЫТИЕ ВОРОТ\n\n"
-            "📞 Позвоните:\n\n"
-            f"{GATE_PHONE}"
+        return await open_gate(
+            update,
+            context
         )
 
-        await update.message.reply_text(msg)
+    # ПРЕДЛОЖЕНИЯ
 
-    return MAIN_MENU
+    elif text == "📝 Предложения":
+
+        return await start_suggestion(
+            update,
+            context
+        )
+
+    # ГОЛОСОВАНИЯ
+
+    elif text == "📊 Голосования":
+
+        return await poll_menu(
+            update,
+            context
+        )
+
+    elif text == "➕ Создать голосование":
+
+        return await start_poll_creation(
+            update,
+            context
+        )
+
+    elif text == "📋 Доступные голосования":
+
+        return await show_polls(
+            update,
+            context
+        )
+
+    elif text == "⚙️ Управлять голосованием":
+
+        return await manage_poll(
+            update,
+            context
+        )
+
+    elif text == "⬅️ Назад":
+
+        return await show_main_menu(
+            update,
+            context
+        )
+
+    current_state = context.user_data.get(
+        "current_state",
+        MAIN_MENU
+    )
+
+    return current_state
 
 # =========================================================
 # CANCEL
 # =========================================================
 
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
-        "До свидания",
+        "👋 До свидания.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -1074,21 +1528,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # POST INIT
 # =========================================================
 
-
 async def post_init(app: Application):
 
     await init_db()
-
-    asyncio.create_task(
-        debt_notifications_loop(app)
-    )
 
     logger.info("Database initialized")
 
 # =========================================================
 # MAIN
 # =========================================================
-
 
 def main():
 
@@ -1099,6 +1547,10 @@ def main():
         .build()
     )
 
+    # =====================================================
+    # CONVERSATION HANDLER
+    # =====================================================
+
     conv_handler = ConversationHandler(
 
         entry_points=[
@@ -1108,6 +1560,7 @@ def main():
         states={
 
             ASK_PHONE: [
+
                 MessageHandler(
                     filters.ALL,
                     ask_phone
@@ -1115,50 +1568,114 @@ def main():
             ],
 
             ASK_PLOT: [
+
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
+                    filters.TEXT &
+                    ~filters.COMMAND,
                     ask_plot
                 )
             ],
 
             MAIN_MENU: [
+
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
+                    filters.TEXT &
+                    ~filters.COMMAND,
                     handle_menu
                 )
             ],
 
-            REQUEST_TEXT: [
+            ASK_SUGGESTION: [
+
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    request_text
+                    filters.TEXT &
+                    ~filters.COMMAND,
+                    save_suggestion
+                )
+            ],
+
+            POLL_MENU: [
+
+                MessageHandler(
+                    filters.TEXT &
+                    ~filters.COMMAND,
+                    handle_menu
+                )
+            ],
+
+            CREATE_POLL_QUESTION: [
+
+                MessageHandler(
+                    filters.TEXT &
+                    ~filters.COMMAND,
+                    create_poll_question
+                )
+            ],
+
+            CREATE_POLL_OPTIONS: [
+
+                MessageHandler(
+                    filters.TEXT &
+                    ~filters.COMMAND,
+                    create_poll_options
                 )
             ]
         },
 
         fallbacks=[
-            CommandHandler("cancel", cancel)
+            CommandHandler(
+                "cancel",
+                cancel
+            )
         ]
     )
 
+    # =====================================================
+    # МОДЕРАЦИЯ
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT &
+            ~filters.COMMAND,
             moderate_chat
         ),
         group=0
     )
 
-    app.add_handler(conv_handler, group=1)
+    # =====================================================
+    # ОСНОВНОЙ HANDLER
+    # =====================================================
 
     app.add_handler(
-        CallbackQueryHandler(handle_vote)
+        conv_handler,
+        group=1
+    )
+
+    # =====================================================
+    # CALLBACK ГОЛОСОВАНИЯ
+    # =====================================================
+
+    app.add_handler(
+        CallbackQueryHandler(
+            vote_callback,
+            pattern="^vote:"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            close_poll_callback,
+            pattern="^closepoll:"
+        )
     )
 
     logger.info("Bot started")
 
     app.run_polling()
 
+# =========================================================
+# START BOT
 # =========================================================
 
 if __name__ == "__main__":
